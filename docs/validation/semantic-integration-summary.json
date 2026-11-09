@@ -1,0 +1,127 @@
+{
+  "off": {
+    "frames": 30,
+    "mean_track_ms": 9.613003566666666,
+    "median_track_ms": 9.627357,
+    "mean_keypoints": 1007.1,
+    "states": [
+      "2"
+    ],
+    "trajectory_lines": 30
+  },
+  "all": {
+    "frames": 30,
+    "mean_track_ms": 333.2377626666667,
+    "median_track_ms": 331.8328535,
+    "mean_keypoints": 1005.4333333333333,
+    "states": [
+      "2"
+    ],
+    "trajectory_lines": 30,
+    "mean_instances": 10.1,
+    "mean_blocked_ratio": 0.43190809461805557,
+    "mean_pre_ms": 0.7953344666666666,
+    "mean_infer_ms": 278.12656906666666,
+    "mean_post_ms": 23.0396316,
+    "mean_candidates": 15494.133333333333,
+    "mean_rejected": 11348.433333333332,
+    "violations": 0
+  },
+  "selected": {
+    "frames": 30,
+    "mean_track_ms": 335.9032375333333,
+    "median_track_ms": 334.39049750000004,
+    "mean_keypoints": 1006.1666666666666,
+    "states": [
+      "2"
+    ],
+    "trajectory_lines": 30,
+    "mean_instances": 10.1,
+    "mean_blocked_ratio": 0.30271310763888887,
+    "mean_pre_ms": 0.7674085333333334,
+    "mean_infer_ms": 281.1455511666667,
+    "mean_post_ms": 23.370818766666666,
+    "mean_candidates": 14819.866666666667,
+    "mean_rejected": 9894.566666666668,
+    "violations": 0
+  },
+  "resized": {
+    "frames": 5,
+    "mean_track_ms": 324.036662,
+    "median_track_ms": 311.921129,
+    "mean_keypoints": 936.4,
+    "states": [
+      "2"
+    ],
+    "trajectory_lines": 5,
+    "mean_instances": 10.6,
+    "mean_blocked_ratio": 0.41497395833333334,
+    "mean_pre_ms": 1.0940353999999999,
+    "mean_infer_ms": 288.19345519999996,
+    "mean_post_ms": 22.7325808,
+    "mean_candidates": 4265.4,
+    "mean_rejected": 2655.8,
+    "violations": 0
+  },
+  "empty": {
+    "frames": 5,
+    "mean_track_ms": 334.0476326,
+    "median_track_ms": 322.171861,
+    "mean_keypoints": 1008.8,
+    "states": [
+      "2"
+    ],
+    "trajectory_lines": 5,
+    "mean_instances": 0.0,
+    "mean_blocked_ratio": 0.0,
+    "mean_pre_ms": 0.9156926,
+    "mean_infer_ms": 285.972239,
+    "mean_post_ms": 17.4751878,
+    "mean_candidates": 11675.0,
+    "mean_rejected": 0.0,
+    "violations": 0
+  },
+  "fully-blocked": {
+    "frames": 5,
+    "mean_track_ms": 347.0223956,
+    "median_track_ms": 334.078933,
+    "mean_keypoints": 0,
+    "states": [
+      "1"
+    ],
+    "trajectory_lines": 0,
+    "mean_instances": 10.4,
+    "mean_blocked_ratio": 1.0,
+    "mean_pre_ms": 0.917887,
+    "mean_infer_ms": 288.2208606,
+    "mean_post_ms": 28.127077,
+    "mean_candidates": 31020.4,
+    "mean_rejected": 31020.4,
+    "violations": 0
+  },
+  "legacy": {
+    "frames": 30,
+    "mean_track_ms": 9.255654533333333,
+    "median_track_ms": 9.043779,
+    "mean_keypoints": 1006.1666666666666,
+    "states": [
+      "2"
+    ],
+    "trajectory_lines": 30
+  },
+  "transition": {
+    "states": [
+      2,
+      4
+    ],
+    "keypoints": [
+      964,
+      0
+    ],
+    "blocked_ratios": [
+      0.0,
+      1.0
+    ],
+    "violations": 0
+  }
+}
