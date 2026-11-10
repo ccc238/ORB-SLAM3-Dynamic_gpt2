@@ -74,6 +74,7 @@ Run.Viewer: 0
 # Baseline: no model initialization, inference or instance association.
 Dynamic.Enable: 0
 Dynamic.MaskOnly: 1
+SemanticMask.Enabled: 0  # Compatibility with the backed-up executable only.
 SemanticMask.Model: "/home/aaa/models/yolo/yolo11s-seg.onnx"
 SemanticMask.Mode: "selected"
 SemanticMask.Classes: [0]
