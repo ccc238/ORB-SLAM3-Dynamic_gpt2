@@ -1,0 +1,33 @@
+{
+  "bgr-run": {
+    "frames": 5,
+    "states": [
+      2
+    ],
+    "violations": 0,
+    "mean_blocked_ratio": 0.28679427083333336
+  },
+  "rgb-run": {
+    "frames": 5,
+    "states": [
+      2
+    ],
+    "violations": 0,
+    "mean_blocked_ratio": 0.28679427083333336
+  },
+  "explicit_off": {
+    "frames": 3,
+    "states": [
+      2
+    ]
+  },
+  "defaults": {
+    "enabled": true,
+    "mode": "selected",
+    "classes": [
+      0
+    ],
+    "model": "$HOME/models/yolo/yolo11s-seg.onnx"
+  },
+  "rgb_bgr_masks_identical": true
+}
