@@ -70,7 +70,7 @@ SemanticConfig SemanticConfig::Read(const std::string& settings) {
     c.enabled=enabled!=0; c.maskOnly=maskOnly!=0;
     // Resolve all execution flags here, before Tracking creates the ONNX session.
     // Legacy feature-masking/association switches cannot override Dynamic.*.
-    // MaskOnly=0 reserves geometry work; no geometric detector exists yet.
+    // MaskOnly remains a compatibility flag; UseEpipolar independently gates diagnostics.
     c.maskingEnabled=false;
     c.associationEnabled=c.enabled;
     c.associationDebug=c.enabled && associationDebug!=0;
@@ -81,11 +81,16 @@ SemanticConfig SemanticConfig::Read(const std::string& settings) {
     ReadValue(fs,"SemanticMask.DilationRadius",c.dilation); ReadValue(fs,"SemanticMask.OutputDirectory",c.output);
     if(c.enabled && c.mode=="selected" && fs["SemanticMask.Classes"].empty())
         std::cout << "SemanticMask: Classes not specified; using default [0:person]." << std::endl;
+    c.epipolar=EpipolarConfig::Read(fs,c.enabled,c.associationEnabled,c.enabled && c.maskingEnabled);
+    c.residual3d=Residual3DConfig::Read(fs,c.enabled,c.associationEnabled,c.enabled && c.maskingEnabled);
+    c.lkcheck=LKCheckConfig::Read(fs);
+    c.dynamicFilter=DynamicFilterConfig::Read(fs);
+    if(c.dynamicFilter.enabled && (!c.enabled || !c.associationEnabled || c.maskingEnabled || !c.epipolar.enabled || !c.residual3d.enabled || !c.lkcheck.enabled || c.residual3d.poseSource!="tracking" || !c.residual3d.useDepthDifferenceGate))
+        throw std::runtime_error("DynamicFilter requires segmentation, association, epipolar, Tracking 3D, LK, depth-difference gate and semantic masking disabled");
     if(c.enabled) ValidateConfig(c);
     std::cout << "Dynamic.Enable=" << c.enabled << " Dynamic.MaskOnly=" << c.maskOnly
-              << " geometry_detection=0 feature_removal=0" << std::endl;
-    if(c.enabled && !c.maskOnly)
-        std::cout << "Dynamic: geometric detection is reserved; running segmentation and association only." << std::endl;
+              << " geometry_detection=" << (c.epipolar.enabled || c.residual3d.enabled) << " dynamic_filter_enabled=" << c.dynamicFilter.enabled << std::endl;
+
     std::cout << "Semantic states: online_segmentation=" << c.enabled << " semantic_feature_masking=" << (c.enabled && c.maskingEnabled) << " feature_instance_association=" << c.associationEnabled << std::endl;
     std::cout << "SemanticMask enabled=" << c.enabled << " model=" << c.model << " device=CPU synchronous mode=" << c.mode << " classes=[";
     for(int id:c.classes) std::cout << id << ":" << SemanticMasker::ClassName(id) << " ";

@@ -140,6 +140,7 @@ KeyFrame* MapPoint::GetReferenceKeyFrame()
 
 void MapPoint::AddObservation(KeyFrame* pKF, int idx)
 {
+    if(pKF->DynamicExcluded(idx)) return;
     unique_lock<mutex> lock(mMutexFeatures);
     tuple<int,int> indexes;
 

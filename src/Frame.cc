@@ -88,6 +88,9 @@ Frame::Frame(const Frame &frame)
             }
         }
 
+    mvbDynamicCandidate=frame.mvbDynamicCandidate; mvbDynamicExcluded=frame.mvbDynamicExcluded;
+    mvPoseOptimizationIndices=frame.mvPoseOptimizationIndices;
+    mPoseObservationAudit=frame.mPoseObservationAudit;
     if(frame.mbHasPose)
         SetPose(frame.GetPose());
 
@@ -139,6 +142,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 
     N = mvKeys.size();
     mvInstanceIds.assign(N,-1);
+    mvbDynamicCandidate.assign(N,false); mvbDynamicExcluded.assign(N,false);
     if(mvKeys.empty())
         return;
 
@@ -239,6 +243,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 
     N = mvKeys.size();
     mvInstanceIds.assign(N,-1);
+    mvbDynamicCandidate.assign(N,false); mvbDynamicExcluded.assign(N,false);
 
     // A fully masked frame is valid input to the normal tracking failure path.
     mb=0;
@@ -336,6 +341,7 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
 
     N = mvKeys.size();
     mvInstanceIds.assign(N,-1);
+    mvbDynamicCandidate.assign(N,false); mvbDynamicExcluded.assign(N,false);
     if(mvKeys.empty())
         return;
 
@@ -1089,6 +1095,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     Nright = mvKeysRight.size();
     N = Nleft + Nright;
     mvInstanceIds.assign(N,-1);
+    mvbDynamicCandidate.assign(N,false); mvbDynamicExcluded.assign(N,false);
 
     if(N == 0)
         return;

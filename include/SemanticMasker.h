@@ -1,5 +1,9 @@
 #ifndef ORB_SLAM3_SEMANTIC_MASKER_H
 #define ORB_SLAM3_SEMANTIC_MASKER_H
+#include "EpipolarMotionDetector.h"
+#include "Residual3D.h"
+#include "LKCheck.h"
+#include "DynamicFilter.h"
 #include <opencv2/core.hpp>
 #include <opencv2/features2d.hpp>
 #include <memory>
@@ -8,6 +12,10 @@
 namespace ORB_SLAM3 {
 std::string DefaultSemanticModelPath();
 struct SemanticConfig {
+    EpipolarConfig epipolar;
+    Residual3DConfig residual3d;
+    LKCheckConfig lkcheck;
+    DynamicFilterConfig dynamicFilter;
     bool enabled=false, maskOnly=true, debug=false, visualize=true;
     bool maskingEnabled=true, associationEnabled=false, associationDebug=false;
     std::string model=DefaultSemanticModelPath(), mode="selected", output="outputs/semantic";

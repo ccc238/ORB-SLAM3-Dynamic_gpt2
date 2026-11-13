@@ -1,5 +1,7 @@
 # 动态模块消融开关
 
+> 本文记录上一阶段的实现与验收。当前已增加独立 `Dynamic.UseEpipolar`（0=启用，1=关闭），其配置、诊断行为及验证见 [背景对极几何诊断](epipolar-diagnostic.md)。下文“几何预留”描述仅对应当时版本。
+
 ## 现有实现与本次范围
 
 本次保留 YOLO11s-seg 与关联实现，仅修改现有配置入口。修改前快照在 `outputs/dynamic-switch/pre-change/source.tar.gz`，同目录保存当时的 `rgbd_tum`、`libORB_SLAM3.so`。当前根目录 `.git` 为空，不能直接创建普通 Git 提交，因此使用备份。
@@ -51,3 +53,9 @@ python3 tools/validate_dynamic_switches.py
 ```
 
 实际编译、运行和窗口验收结果见 [本次验收记录](validation/dynamic-switch-results.md)。短序列开关验收不评价长序列精度，其他传感器仅进行编译回归。
+
+三维诊断开关 `Dynamic.Use3DResidual` 独立采用严格整数 0=启用、1=关闭、缺失关闭，实际 `enabled=(value==0)`。在线分割/实例关联开启且语义屏蔽关闭为硬前提；两几何模块任一开启才执行一次公共诊断匹配。参数与限制见 [三维诊断说明](residual3d-diagnostic.md)，实测见 [验收记录](validation/residual3d-results.md)。不改变 selected/person 默认策略，不剔除特征。
+
+三维启用时 `Dynamic.DepthPoseSource` 缺失默认 `tracking`；仅接受字符串 `tracking` / `background_pnp`。`Residual3D.TrackingMinInliers` 默认 25，使用当前帧 TrackLocalMap 优化后的真实 `mnMatchesInliers` 和计数帧号戳。无效 Tracking 输出 UNKNOWN，不回退 PnP。详见 [位姿来源](depth-pose-sources.md)。
+
+深度差审计新增普通布尔开关 `Residual3D.UseDepthDifferenceGate`（1 开、0 关，缺失默认 0）及 `Residual3D.MaxDepthDifferenceM`（默认 0.20 m）；现有相机 YAML 显式开启。它与单帧深度窗口检查不同，排除样本保留 raw 残差，正式状态为 UNKNOWN。缓存刷新与排除审计见 [审计说明](depth-residual-audit.md)。

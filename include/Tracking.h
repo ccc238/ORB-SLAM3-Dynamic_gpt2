@@ -19,6 +19,7 @@
 
 #ifndef TRACKING_H
 #define TRACKING_H
+#include <functional>
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d/features2d.hpp>
@@ -56,6 +57,22 @@ class Settings;
 
 class Tracking
 {
+    std::unique_ptr<DynamicFilter> mDynamicFilter;
+    std::string mDynamicFilterMode="simulate";
+    std::function<void(Map*,bool)> mBeforeDynamicCommit;
+    std::unique_ptr<EpipolarMotionDetector> mEpipolarDetector;
+    EpipolarResult mEpipolarResult;
+    DiagnosticMatcher mDiagnosticMatcher;
+    std::unique_ptr<Residual3DDetector> mResidual3DDetector;
+    std::unique_ptr<LKCheck> mLKCheck;
+    Residual3DConfig mResidual3DConfig;
+    EpipolarConfig mDiagnosticEpipolarConfig;
+    Residual3DResult mResidual3DResult;
+    TrackingDepthPose mDepthTrackingPose,mPreviousDepthTrackingPose;
+    KeyFrame* mDepthPoseReference=nullptr; // Same lifetime policy as mlpReferences; cleared by every map/reset hook.
+    long mDepthTrackingInlierFrame=-1;
+    size_t mDepthDiagnosticEpoch=0;
+    void CaptureDepthTrackingPose(Map* map);
     std::shared_ptr<SemanticMasker> mSemanticMasker;  
 
 public:

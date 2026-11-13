@@ -824,6 +824,11 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     optimizer.setAlgorithm(solver);
 
     int nInitialCorrespondences=0;
+    pFrame->mvPoseOptimizationIndices.clear();
+    pFrame->mPoseObservationAudit=PoseObservationAudit();
+    pFrame->mPoseObservationAudit.frameId=pFrame->mnId;
+    pFrame->mPoseObservationAudit.timestamp=pFrame->mTimeStamp;
+    bool auditSolveSucceeded=true;
 
     // Set Frame vertex
     g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
@@ -857,9 +862,11 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
     for(int i=0; i<N; i++)
     {
+        if(pFrame->DynamicExcluded(i)) continue;
         MapPoint* pMP = pFrame->mvpMapPoints[i];
         if(pMP)
         {
+            pFrame->mvPoseOptimizationIndices.push_back(i);
             //Conventional SLAM
             if(!pFrame->mpCamera2){
                 // Monocular observation
@@ -993,6 +1000,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     }
     }
 
+    pFrame->mPoseObservationAudit.constructed=true;
     if(nInitialCorrespondences<3)
         return 0;
 
@@ -1009,7 +1017,12 @@ int Optimizer::PoseOptimization(Frame *pFrame)
         vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
 
         optimizer.initializeOptimization(0);
-        optimizer.optimize(its[it]);
+        const int solvedIterations=optimizer.optimize(its[it]);
+        if(solvedIterations<=0)auditSolveSucceeded=false;
+        // Only the extra filtering transaction consumes this failure result.
+        // Preserve original tracking/relocalization behavior when no exclusion is active.
+        if(solvedIterations<=0 && std::find(pFrame->mvbDynamicExcluded.begin(),pFrame->mvbDynamicExcluded.end(),true)!=pFrame->mvbDynamicExcluded.end())
+            return -1;
 
         nBad=0;
         for(size_t i=0, iend=vpEdgesMono.size(); i<iend; i++)
@@ -1110,6 +1123,10 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             SE3quat_recov.translation().cast<float>());
     pFrame->SetPose(pose);
 
+    pFrame->mPoseObservationAudit.resultAvailable=auditSolveSucceeded&&pose.matrix().allFinite();
+    if(pFrame->mPoseObservationAudit.resultAvailable)
+        for(int i:pFrame->mvPoseOptimizationIndices)
+            if(!pFrame->mvbOutlier[i])pFrame->mPoseObservationAudit.inlierIndices.push_back(i);
     return nInitialCorrespondences-nBad;
 }
 

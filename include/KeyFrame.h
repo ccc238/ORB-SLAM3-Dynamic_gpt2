@@ -19,6 +19,7 @@
 
 #ifndef KEYFRAME_H
 #define KEYFRAME_H
+#include <boost/serialization/version.hpp>
 
 #include "MapPoint.h"
 #include "Thirdparty/DBoW2/DBoW2/BowVector.h"
@@ -57,6 +58,7 @@ class KeyFrame
     void serialize(Archive& ar, const unsigned int version)
     {
         ar & mnId;
+        if(version>=1) ar & mvbDynamicExcluded;
         ar & const_cast<long unsigned int&>(mnFrameId);
         ar & const_cast<double&>(mTimeStamp);
         // Grid
@@ -193,6 +195,8 @@ class KeyFrame
     }
 
 public:
+    std::vector<bool> mvbDynamicExcluded;
+    bool DynamicExcluded(size_t i) const {return i<mvbDynamicExcluded.size() && mvbDynamicExcluded[i];}
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     KeyFrame();
     KeyFrame(Frame &F, Map* pMap, KeyFrameDatabase* pKFDB);
@@ -540,5 +544,7 @@ public:
 };
 
 } //namespace ORB_SLAM
+
+BOOST_CLASS_VERSION(ORB_SLAM3::KeyFrame, 1)
 
 #endif // KEYFRAME_H

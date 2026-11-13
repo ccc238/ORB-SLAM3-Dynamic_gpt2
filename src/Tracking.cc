@@ -21,6 +21,7 @@
 #include <numeric>
 #include <sstream>
 #include <iomanip>
+#include <cstdlib>
 
 #include "ORBmatcher.h"
 #include "FrameDrawer.h"
@@ -43,6 +44,38 @@ using namespace std;
 namespace ORB_SLAM3
 {
 
+namespace {
+// Opt-in evidence export only. No matching, filtering or Frame mutation.
+// The caller holds the Tracking map-update lock. Serialize immediately: do not
+// retain Frame buffers or MapPoint pointers across Tracking updates.
+void ExportResidualMatchAudit(const Frame& current, const Frame& previous,
+                              const char* stage, int trackingState)
+{
+    const char* directory=std::getenv("ORB_RESIDUAL_MATCH_AUDIT_DIR");
+    if(!directory || !*directory) return;
+    cv::FileStorage out(std::string(directory)+"/"+stage+"_"+
+                        std::to_string(current.mnId)+".yml.gz",cv::FileStorage::WRITE);
+    if(!out.isOpened()) throw std::runtime_error("Cannot open residual match audit output");
+    out << "stage" << stage << "tracking_state" << trackingState;
+    auto frame=[&](const char* name,const Frame& f) {
+        out << name << "{" << "frame_id" << std::to_string(f.mnId)
+            << "timestamp" << f.mTimeStamp << "descriptors" << f.mDescriptors
+            << "raw_keys" << f.mvKeys << "map_points" << "[";
+        for(size_t i=0;i<f.mvpMapPoints.size();++i) {
+            MapPoint* point=f.mvpMapPoints[i];
+            out << "{" << "feature_id" << int(i) << "point_id"
+                << (point?std::to_string(point->mnId):"NONE")
+                << "outlier" << int(f.mvbOutlier[i]) << "}";
+        }
+        out << "]" << "}";
+    };
+    frame("current",current);
+    // A default/reset Frame has unspecified scalar IDs; inspect owned buffers first.
+    if(!previous.mDescriptors.empty() && previous.mnId<current.mnId)
+        frame("previous",previous);
+}
+}
+
 
 Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
@@ -52,12 +85,46 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
     const auto semanticConfig = SemanticConfig::Read(strSettingPath);
+    mDynamicFilterMode=semanticConfig.dynamicFilter.mode;
+    if(sensor==System::RGBD) {
+        cv::FileStorage displaySettings(strSettingPath,cv::FileStorage::READ);
+        std::string output="outputs/dynamic-filter-view";
+        int every=10;
+        if(!displaySettings["Dynamic.FilterViewOutputDirectory"].empty()) {
+            if(!displaySettings["Dynamic.FilterViewOutputDirectory"].isString())throw std::runtime_error("FilterViewOutputDirectory must be string");
+            output=std::string(displaySettings["Dynamic.FilterViewOutputDirectory"]);
+        }
+        if(!displaySettings["Dynamic.FilterViewSaveEvery"].empty()) {
+            if(!displaySettings["Dynamic.FilterViewSaveEvery"].isInt())throw std::runtime_error("FilterViewSaveEvery must be integer");
+            every=int(displaySettings["Dynamic.FilterViewSaveEvery"]);
+        }
+        if(every<0)throw std::runtime_error("FilterViewSaveEvery must be >=0");
+        mpFrameDrawer->ConfigureDynamicFilterView(output,every);
+    }
+    if(semanticConfig.dynamicFilter.enabled) {
+        if(sensor!=System::RGBD) throw std::runtime_error("DynamicFilter supports pure RGB-D only");
+        mDynamicFilter.reset(new DynamicFilter(semanticConfig.dynamicFilter));
+    }
     mpFrameDrawer->EnableSemanticView(semanticConfig.enabled && semanticConfig.visualize);
     if(semanticConfig.enabled) {
         if(sensor!=System::RGBD && sensor!=System::IMU_RGBD)
             throw std::runtime_error("SemanticMask is supported only for RGB-D");
         mSemanticMasker = std::make_shared<SemanticMasker>(semanticConfig);
     }
+    if(semanticConfig.epipolar.enabled)
+        mEpipolarDetector.reset(new EpipolarMotionDetector(semanticConfig.epipolar));
+    mResidual3DConfig=semanticConfig.residual3d;
+    if(semanticConfig.lkcheck.enabled) {
+        if(sensor!=System::RGBD && sensor!=System::IMU_RGBD)
+            throw std::runtime_error("LKCheck currently supports RGB-D only");
+        mLKCheck.reset(new LKCheck(semanticConfig.lkcheck));
+    }
+    mDiagnosticEpipolarConfig=semanticConfig.epipolar;
+    if(mResidual3DConfig.enabled)
+        mResidual3DDetector.reset(new Residual3DDetector(mResidual3DConfig));
+    if(mResidual3DConfig.enabled && semanticConfig.epipolar.enabled &&
+       std::abs(mResidual3DConfig.ratio-semanticConfig.epipolar.ratio)>1e-12)
+        throw std::runtime_error("Geometry: shared MatchRatio must agree when both modules are enabled");
     // Load camera parameters from settings file
     if(settings){
         newParameterLoader(settings);
@@ -1611,10 +1678,147 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
         instanceIds=mCurrentFrame.mvInstanceIds;
         mSemanticMasker->RecordAssociation(imRGB,mbRGB,semantic,mCurrentFrame.mvKeys,instanceIds,mCurrentFrame.mnId,timestamp);
     }
+    EpipolarInput pendingDepthInput;
+    DiagnosticPair pendingDepthPair;
+    EpipolarResult pendingDepthEpipolar;
+    bool pendingTrackingDepth=false;
+    EpipolarInput lkInput;
+    DiagnosticPair lkPair;
+    LKCheckResult lkResult;
+    EpipolarResult lkEpipolar;
+    Residual3DResult lkDepth;
+    bool haveLKPair=false;
+    const size_t depthEpoch=mDepthDiagnosticEpoch;
+    auto evaluateDepth=[&](const EpipolarInput& input,const DiagnosticPair& pair,const EpipolarResult* epi,const DepthRelativeMotion* motion) {
+        // Debug-only mutation audit surrounds the diagnostic, never the SLAM tracking operation.
+        const bool audit=mResidual3DConfig.debug && depthEpoch==mDepthDiagnosticEpoch;
+        const int count=audit?mCurrentFrame.N:0;
+        cv::Mat descriptors;
+        std::vector<MapPoint*> points;
+        if(audit) {descriptors=mCurrentFrame.mDescriptors.clone();points=mCurrentFrame.mvpMapPoints;}
+        auto result=mResidual3DDetector->Process(input,pair,epi,imRGB,mbRGB,motion);
+        if(audit) {
+            if(count!=mCurrentFrame.N||descriptors.size()!=mCurrentFrame.mDescriptors.size()||descriptors.type()!=mCurrentFrame.mDescriptors.type()||
+               (!descriptors.empty()&&cv::norm(descriptors,mCurrentFrame.mDescriptors,cv::NORM_INF)!=0)||points!=mCurrentFrame.mvpMapPoints)
+                throw std::runtime_error("Residual3D: diagnostic mutated features/descriptors/map-point associations");
+            std::cout<<"[Residual3DInvariant] frame="<<input.frameId<<" count_descriptors_mappoints_unchanged=1"<<std::endl;
+        }
+        return result;
+    };
+    if(mEpipolarDetector || mResidual3DDetector || mLKCheck) {
+      if(mEpipolarDetector || mResidual3DDetector) {
+        if(mpCamera->GetType()!=GeometricCamera::CAM_PINHOLE)
+            throw std::runtime_error("Geometry: diagnostics require pinhole undistorted pixel coordinates");
+        if(!mSemanticMasker || !mCurrentFrame.mbInstanceAssociation ||
+           semantic.instanceLabels.empty() || semantic.instanceLabels.size()!=imRGB.size() ||
+           mSemanticMasker->MaskingEnabled())
+            throw std::runtime_error("Geometry: segmentation/association unavailable or semantic masking active");
+      }
+        EpipolarInput input;
+        input.rawKeys=mCurrentFrame.mvKeys;
+        input.undistortedKeys=mCurrentFrame.mvKeysUn;
+        input.descriptors=mCurrentFrame.mDescriptors;
+        input.instances=mCurrentFrame.mvInstanceIds;
+        input.K=mCurrentFrame.mK; input.distortion=mCurrentFrame.mDistCoef;
+        input.size=imRGB.size(); input.frameId=mCurrentFrame.mnId; input.timestamp=timestamp;
+        if(mResidual3DDetector) {
+            input.depths=mCurrentFrame.mvDepth;
+            input.depthReasons.resize(input.rawKeys.size());
+            for(size_t j=0;j<input.rawKeys.size();++j)
+                input.depthReasons[j]=Residual3DDetector::CheckDepth(input.depths.at(j),input.rawKeys[j].pt,imDepth,mResidual3DConfig).reason;
+        }
+        const double ratio=mResidual3DDetector?mResidual3DConfig.ratio:mDiagnosticEpipolarConfig.ratio;
+        const double maxDt=mResidual3DDetector?(mEpipolarDetector?std::max(mResidual3DConfig.maxDt,mDiagnosticEpipolarConfig.maxDt):mResidual3DConfig.maxDt):mDiagnosticEpipolarConfig.maxDt;
+        DiagnosticPair pair;
+        if(mEpipolarDetector || mResidual3DDetector) pair=mDiagnosticMatcher.Process(input,ratio,maxDt);
+        if(mEpipolarDetector) mEpipolarResult=mEpipolarDetector->Process(input,imRGB,mbRGB,&pair);
+        if(mLKCheck) {
+            lkInput=input;lkInput.descriptors.release(); // vectors have value ownership; no descriptor copy is needed by LK.
+            lkPair=pair;haveLKPair=bool(mEpipolarDetector || mResidual3DDetector);
+            const int count=mCurrentFrame.N;
+            const cv::Mat descriptors=mCurrentFrame.mDescriptors.clone();
+            const auto points=mCurrentFrame.mvpMapPoints;
+            const auto outliers=mCurrentFrame.mvbOutlier;
+            const cv::Mat grayBefore=mImGray.clone();
+            lkResult=mLKCheck->Process(lkInput,haveLKPair?&lkPair:nullptr,mImGray);
+            if(count!=mCurrentFrame.N || cv::norm(descriptors,mCurrentFrame.mDescriptors,cv::NORM_INF)!=0 ||
+               points!=mCurrentFrame.mvpMapPoints || outliers!=mCurrentFrame.mvbOutlier || cv::norm(grayBefore,mImGray,cv::NORM_INF)!=0)
+                throw std::runtime_error("LKCheck: input mutation detected");
+            std::cout<<"[LKCheckInvariant] frame="<<input.frameId<<" count_descriptors_mappoints_outliers_gray_unchanged=1"<<std::endl;
+            if(mEpipolarDetector) lkEpipolar=mEpipolarResult;
+        }
+        if(mResidual3DDetector) {
+            // Each diagnostic still enforces its own maximum time interval.
+            if(pair.matching.dt>mResidual3DConfig.maxDt) {
+                pair.matching.reason="TIME_GAP";
+                for(auto& f:pair.matching.features) f.previousIndex=-1;
+            }
+            if(mResidual3DConfig.poseSource=="background_pnp")
+                mResidual3DResult=evaluateDepth(input,pair,mEpipolarDetector?&mEpipolarResult:nullptr,nullptr);
+            else {
+                pendingTrackingDepth=true;pendingDepthInput=input;pendingDepthPair=pair;
+                pendingDepthInput.descriptors=input.descriptors.clone();
+                pendingDepthInput.K=input.K.clone();pendingDepthInput.distortion=input.distortion.clone();
+                pendingDepthEpipolar=mEpipolarResult;
+            }
+            if(mLKCheck && mResidual3DConfig.poseSource=="background_pnp") lkDepth=mResidual3DResult;
+        }
+    }
     std::vector<cv::KeyPoint> semanticKeys;
     if(mSemanticMasker) semanticKeys=mCurrentFrame.mvKeys;
+    if(pendingTrackingDepth) {mDepthTrackingPose=TrackingDepthPose();mDepthTrackingInlierFrame=-1;}
+    bool dynamicProcessed=false,viewCaptured=false;
+    DynamicFilterView filterView;
+    filterView.frameId=mCurrentFrame.mnId;filterView.timestamp=timestamp;
+    filterView.keys=mCurrentFrame.mvKeys;
+    filterView.candidates.assign(filterView.keys.size(),false);
+    filterView.excludedObservations.assign(filterView.keys.size(),false);
+    filterView.enabled=bool(mDynamicFilter);filterView.mode=mDynamicFilterMode;
+    mBeforeDynamicCommit=[&](Map* map,bool eligible) {
+        if(!mDynamicFilter || !pendingTrackingDepth || depthEpoch!=mDepthDiagnosticEpoch) {
+            filterView=MakeDynamicFilterView(mCurrentFrame,mCurrentFrame.mvPoseOptimizationIndices,
+                mCurrentFrame.mPoseObservationAudit,bool(mDynamicFilter),mDynamicFilterMode,false,false,
+                mDynamicFilter?"DIAGNOSTIC_UNAVAILABLE":"FILTER_DISABLED");
+            viewCaptured=true;
+            return;
+        }
+        CaptureDepthTrackingPose(map);
+        auto motion=Residual3DDetector::TrackingMotion(pendingDepthInput,pendingDepthPair,mPreviousDepthTrackingPose,mDepthTrackingPose,mResidual3DConfig);
+        mResidual3DResult=evaluateDepth(pendingDepthInput,pendingDepthPair,&pendingDepthEpipolar,&motion);
+        mDynamicFilter->Process(mCurrentFrame,pendingDepthInput,pendingDepthPair,pendingDepthEpipolar,mResidual3DResult,lkResult,eligible,mnMatchesInliers,
+            mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames?50:30);
+        filterView=mDynamicFilter->LastView();viewCaptured=true;
+        if(eligible) mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
+        for(int i=0;mDepthTrackingInlierFrame==long(mCurrentFrame.mnId) && i<mCurrentFrame.N;++i)
+            if(mCurrentFrame.mvpMapPoints[i] && !mCurrentFrame.mvbOutlier[i] && !mCurrentFrame.DynamicExcluded(i))
+                mCurrentFrame.mvpMapPoints[i]->IncreaseFound();
+        dynamicProcessed=true;
+    };
     Track();
+    mBeforeDynamicCommit=nullptr;
+    if(pendingTrackingDepth && !dynamicProcessed) {
+        auto motion=Residual3DDetector::TrackingMotion(pendingDepthInput,pendingDepthPair,mPreviousDepthTrackingPose,mDepthTrackingPose,mResidual3DConfig);
+        if(depthEpoch!=mDepthDiagnosticEpoch) {motion.motionValid=false;motion.reason="DIAGNOSTIC_RESET_DURING_TRACK";}
+        mResidual3DResult=evaluateDepth(pendingDepthInput,pendingDepthPair,mEpipolarDetector?&pendingDepthEpipolar:nullptr,&motion);
+        // Commit only after evaluating this exact pair. Never read mLastFrame here.
+        if(mDynamicFilter) {
+            mDynamicFilter->Process(mCurrentFrame,pendingDepthInput,pendingDepthPair,pendingDepthEpipolar,mResidual3DResult,lkResult,false,mnMatchesInliers,50);
+            filterView=mDynamicFilter->LastView();viewCaptured=true;
+        }
+    }
+    if(!viewCaptured && filterView.frameId==long(mCurrentFrame.mnId) && filterView.keys.size()==size_t(mCurrentFrame.N)) {
+        filterView=MakeDynamicFilterView(mCurrentFrame,mCurrentFrame.mvPoseOptimizationIndices,
+            mCurrentFrame.mPoseObservationAudit,bool(mDynamicFilter),mDynamicFilterMode,false,false,
+            mDynamicFilter?"INITIALIZATION_OR_EARLY_RETURN":"FILTER_DISABLED");
+    }
+    if(mSensor==System::RGBD)mpFrameDrawer->UpdateDynamicFilterFrame(imRGB,mbRGB,filterView);
+    if(pendingTrackingDepth && depthEpoch==mDepthDiagnosticEpoch) mPreviousDepthTrackingPose=mDepthTrackingPose;
 
+    if(mLKCheck) {
+        if(depthEpoch!=mDepthDiagnosticEpoch) LKCheck::Invalidate(lkResult,"DIAGNOSTIC_RESET_DURING_TRACK");
+        mLKCheck->Record(lkInput,haveLKPair?&lkPair:nullptr,lkResult,mEpipolarDetector?&lkEpipolar:nullptr,
+                         mResidual3DDetector?(mResidual3DConfig.poseSource=="background_pnp"?&lkDepth:&mResidual3DResult):nullptr);
+    }
     if(mSemanticMasker) {
         const double frameMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-frameStart).count();
         mSemanticMasker->Record(imRGB,mbRGB,semantic,semanticKeys,timestamp,mState,
@@ -1853,6 +2057,46 @@ void Tracking::ResetFrameIMU()
     // TODO To implement...
 }
 
+
+void Tracking::CaptureDepthTrackingPose(Map* map)
+{
+    if(!mResidual3DDetector || mResidual3DConfig.poseSource!="tracking") return;
+    if(mSensor==System::RGBD && !mbOnlyTracking)
+        ExportResidualMatchAudit(mCurrentFrame,mLastFrame,"final",int(mState));
+    TrackingDepthPose pose;
+    pose.frameId=mCurrentFrame.mnId;pose.timestamp=mCurrentFrame.mTimeStamp;
+    pose.trackingOK=mState==OK;pose.hasPose=mCurrentFrame.HasPose();
+    pose.inliers=mDepthTrackingInlierFrame==long(mCurrentFrame.mnId)?mnMatchesInliers:-1;
+    pose.relocalizationFrame=mnLastRelocFrameId;
+    if(map) {pose.mapId=map->GetId();pose.mapChange=map->GetMapChangeIndex();pose.bigChange=map->GetLastBigChangeIdx();}
+    if(pose.hasPose) {
+        const Eigen::Matrix4d matrix=mCurrentFrame.GetPose().matrix().cast<double>();
+        for(int y=0;y<4;++y) for(int x=0;x<4;++x) pose.Tcw(y,x)=matrix(y,x);
+    }
+    pose.originalTcw=pose.Tcw;pose.originalMapChange=pose.mapChange;
+    auto matrix=[](const Sophus::SE3f& transform) {
+        cv::Matx44d value;const Eigen::Matrix4d m=transform.matrix().cast<double>();
+        for(int y=0;y<4;++y) for(int x=0;x<4;++x) value(y,x)=m(y,x);
+        return value;
+    };
+    // Refresh only our previous diagnostic snapshot, under the same map update lock.
+    if(mPreviousDepthTrackingPose.mapChange!=pose.mapChange && mPreviousDepthTrackingPose.frameId>=0) {
+        const bool referenceValid=mDepthPoseReference && !mDepthPoseReference->isBad() && mDepthPoseReference->GetMap()==map;
+        // Inertial map revisions may include scale initialization/refinement; do not treat them as ordinary metric BA.
+        if(mSensor!=System::RGBD) mPreviousDepthTrackingPose.rebaseReason="INERTIAL_MAP_REVISION_UNSUPPORTED";
+        else Residual3DDetector::RebasePreviousPose(mPreviousDepthTrackingPose,pose,
+            referenceValid?matrix(mDepthPoseReference->GetPose()):cv::Matx44d::eye(),
+            referenceValid?long(mDepthPoseReference->mnId):-1,referenceValid?long(map->GetId()):-1,referenceValid);
+    }
+    KeyFrame* reference=mCurrentFrame.mpReferenceKF;
+    mDepthPoseReference=nullptr;
+    if(pose.hasPose && reference && !reference->isBad() && reference->GetMap()==map) {
+        pose.referenceId=reference->mnId;pose.referenceTcw=matrix(reference->GetPose());
+        pose.frameToReference=pose.Tcw*pose.referenceTcw.inv(cv::DECOMP_LU);
+        mDepthPoseReference=reference;
+    }
+    mDepthTrackingPose=pose;
+}
 
 void Tracking::Track()
 {
@@ -2226,6 +2470,10 @@ void Tracking::Track()
             //}
         }
 
+        // Final RGB-D filter transaction, before motion model, keyframe/map and trajectory commit.
+        if(mBeforeDynamicCommit) mBeforeDynamicCommit(pCurrentMap,bOK && mLastProcessedState==OK && mState==OK &&
+            mSensor==System::RGBD && !mbOnlyTracking && mnLastRelocFrameId!=mCurrentFrame.mnId);
+
         // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
         if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
            (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && pCurrentMap->isImuInitialized())
@@ -2325,7 +2573,7 @@ void Tracking::Track()
             // with those points so we discard them in the frame. Only has effect if lastframe is tracked
             for(int i=0; i<mCurrentFrame.N;i++)
             {
-                if(mCurrentFrame.mvpMapPoints[i] && mCurrentFrame.mvbOutlier[i])
+                if(mCurrentFrame.mvpMapPoints[i] && (mCurrentFrame.mvbOutlier[i] || mCurrentFrame.DynamicExcluded(i)))
                     mCurrentFrame.mvpMapPoints[i]=static_cast<MapPoint*>(NULL);
             }
         }
@@ -2354,12 +2602,16 @@ void Tracking::Track()
         if(!mCurrentFrame.mpReferenceKF)
             mCurrentFrame.mpReferenceKF = mpReferenceKF;
 
+        CaptureDepthTrackingPose(pCurrentMap);
         mLastFrame = Frame(mCurrentFrame);
     }
 
 
 
 
+    // Still under pCurrentMap->mMutexMapUpdate, after all tracking pose optimization.
+    // mLastFrame may already have been copied; use the independent previous diagnostic snapshot.
+    if(mDepthTrackingPose.frameId!=long(mCurrentFrame.mnId)) CaptureDepthTrackingPose(pCurrentMap);
     if(mState==OK || mState==RECENTLY_LOST)
     {
         // Store frame pose information to retrieve the complete camera trajectory afterwards.
@@ -2724,6 +2976,15 @@ void Tracking::CreateInitialMapMonocular()
 
 void Tracking::CreateMapInAtlas()
 {
+    if(mEpipolarDetector) mEpipolarDetector->Reset();
+    mEpipolarResult=EpipolarResult();
+    mDiagnosticMatcher.Reset();
+    if(mLKCheck) mLKCheck->Reset();
+    if(mResidual3DDetector) mResidual3DDetector->Reset();
+    mResidual3DResult=Residual3DResult();
+    mDepthTrackingPose=TrackingDepthPose();mPreviousDepthTrackingPose=TrackingDepthPose();
+    mDepthPoseReference=nullptr;
+    mDepthTrackingInlierFrame=-1;++mDepthDiagnosticEpoch;
     mnLastInitFrameId = mCurrentFrame.mnId;
     mpAtlas->CreateNewMap();
     if (mSensor==System::IMU_STEREO || mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_RGBD)
@@ -2959,6 +3220,9 @@ bool Tracking::TrackWithMotionModel()
 
     }
 
+    if(mSensor==System::RGBD && !mbOnlyTracking)
+        ExportResidualMatchAudit(mCurrentFrame,mLastFrame,"motion_model",int(mState));
+
     if(nmatches<20)
     {
         Verbose::PrintMess("Not enough matches!!", Verbose::VERBOSITY_NORMAL);
@@ -3073,7 +3337,7 @@ bool Tracking::TrackLocalMap()
         {
             if(!mCurrentFrame.mvbOutlier[i])
             {
-                mCurrentFrame.mvpMapPoints[i]->IncreaseFound();
+                if(!mDynamicFilter) mCurrentFrame.mvpMapPoints[i]->IncreaseFound();
                 if(!mbOnlyTracking)
                 {
                     if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
@@ -3087,6 +3351,8 @@ bool Tracking::TrackLocalMap()
         }
     }
 
+    // Stamp only this frame's post-optimization count; initialization/VO/early returns cannot reuse it.
+    if(mResidual3DDetector && mResidual3DConfig.poseSource=="tracking") mDepthTrackingInlierFrame=mCurrentFrame.mnId;
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
@@ -3174,6 +3440,7 @@ bool Tracking::NeedNewKeyFrame()
         int N = (mCurrentFrame.Nleft == -1) ? mCurrentFrame.N : mCurrentFrame.Nleft;
         for(int i =0; i<N; i++)
         {
+            if(mCurrentFrame.DynamicExcluded(i)) continue;
             if(mCurrentFrame.mvDepth[i]>0 && mCurrentFrame.mvDepth[i]<mThDepth)
             {
                 if(mCurrentFrame.mvpMapPoints[i] && !mCurrentFrame.mvbOutlier[i])
@@ -3323,6 +3590,7 @@ void Tracking::CreateNewKeyFrame()
         vDepthIdx.reserve(mCurrentFrame.N);
         for(int i=0; i<N; i++)
         {
+            if(mCurrentFrame.DynamicExcluded(i)) continue;
             float z = mCurrentFrame.mvDepth[i];
             if(z>0)
             {
@@ -3394,6 +3662,16 @@ void Tracking::CreateNewKeyFrame()
         }
     }
 
+
+    if(mDynamicFilter) {
+        int excluded=0;
+        for(int i=0;i<mCurrentFrame.N;++i) if(mCurrentFrame.DynamicExcluded(i)) {
+            ++excluded;
+            if(pKF->GetMapPoint(i)) throw std::runtime_error("DynamicFilter: excluded keyframe observation or depth point committed");
+        }
+        std::cout<<"[DynamicFilterMapCommit] frame="<<mCurrentFrame.mnId<<" keyframe="<<pKF->mnId
+                 <<" excluded="<<excluded<<" excluded_observations_absent=1"<<std::endl;
+    }
 
     mpLocalMapper->InsertKeyFrame(pKF);
 
@@ -3841,6 +4119,15 @@ bool Tracking::Relocalization()
 
 void Tracking::Reset(bool bLocMap)
 {
+    if(mEpipolarDetector) mEpipolarDetector->Reset();
+    mEpipolarResult=EpipolarResult();
+    mDiagnosticMatcher.Reset();
+    if(mLKCheck) mLKCheck->Reset();
+    if(mResidual3DDetector) mResidual3DDetector->Reset();
+    mResidual3DResult=Residual3DResult();
+    mDepthTrackingPose=TrackingDepthPose();mPreviousDepthTrackingPose=TrackingDepthPose();
+    mDepthPoseReference=nullptr;
+    mDepthTrackingInlierFrame=-1;++mDepthDiagnosticEpoch;
     Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
 
     if(mpViewer)
@@ -3902,6 +4189,15 @@ void Tracking::Reset(bool bLocMap)
 
 void Tracking::ResetActiveMap(bool bLocMap)
 {
+    if(mEpipolarDetector) mEpipolarDetector->Reset();
+    mEpipolarResult=EpipolarResult();
+    mDiagnosticMatcher.Reset();
+    if(mLKCheck) mLKCheck->Reset();
+    if(mResidual3DDetector) mResidual3DDetector->Reset();
+    mResidual3DResult=Residual3DResult();
+    mDepthTrackingPose=TrackingDepthPose();mPreviousDepthTrackingPose=TrackingDepthPose();
+    mDepthPoseReference=nullptr;
+    mDepthTrackingInlierFrame=-1;++mDepthDiagnosticEpoch;
     Verbose::PrintMess("Active map Reseting", Verbose::VERBOSITY_NORMAL);
     if(mpViewer)
     {
@@ -3998,6 +4294,15 @@ vector<MapPoint*> Tracking::GetLocalMapMPS()
 
 void Tracking::ChangeCalibration(const string &strSettingPath)
 {
+    if(mEpipolarDetector) mEpipolarDetector->Reset();
+    mEpipolarResult=EpipolarResult();
+    mDiagnosticMatcher.Reset();
+    if(mLKCheck) mLKCheck->Reset();
+    if(mResidual3DDetector) mResidual3DDetector->Reset();
+    mResidual3DResult=Residual3DResult();
+    mDepthTrackingPose=TrackingDepthPose();mPreviousDepthTrackingPose=TrackingDepthPose();
+    mDepthPoseReference=nullptr;
+    mDepthTrackingInlierFrame=-1;++mDepthDiagnosticEpoch;
     cv::FileStorage fSettings(strSettingPath, cv::FileStorage::READ);
     float fx = fSettings["Camera.fx"];
     float fy = fSettings["Camera.fy"];
@@ -4115,6 +4420,15 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
 
 void Tracking::NewDataset()
 {
+    if(mEpipolarDetector) mEpipolarDetector->Reset();
+    mEpipolarResult=EpipolarResult();
+    mDiagnosticMatcher.Reset();
+    if(mLKCheck) mLKCheck->Reset();
+    if(mResidual3DDetector) mResidual3DDetector->Reset();
+    mResidual3DResult=Residual3DResult();
+    mDepthTrackingPose=TrackingDepthPose();mPreviousDepthTrackingPose=TrackingDepthPose();
+    mDepthPoseReference=nullptr;
+    mDepthTrackingInlierFrame=-1;++mDepthDiagnosticEpoch;
     mnNumDataset++;
 }
 

@@ -74,7 +74,7 @@ Run.Viewer: 1
 # Master switch defaults to 0 if absent. MaskOnly defaults to 1.
 Dynamic.Enable: 1
 Dynamic.MaskOnly: 1
-# MaskOnly=0 reserves geometry detection; currently also preserves all features.
+# MaskOnly is retained for compatibility; UseEpipolar controls diagnostics independently.
 # Model defaults to $HOME/models/yolo/yolo11s-seg.onnx
 SemanticMask.Mode: "selected"
 SemanticMask.Classes: [0]
@@ -90,3 +90,45 @@ SemanticMask.OutputDirectory: "outputs/instance-association/debug"
 # Dynamic.Enable=1 enables association and always disables feature masking.
 # Writes per-frame overlay, uint16 labels and CSV only when explicitly enabled.
 SemanticMask.AssociationDebug: 0
+
+# 对极几何诊断：0=启用，1=关闭；缺失默认 1。仅读取启动配置，不剔除特征。
+Dynamic.UseEpipolar: 0
+# Independent CSV / overlay switches and saving frequency (diagnostics still run every frame).
+Epipolar.Debug: 0
+Epipolar.Visualize: 0
+Epipolar.SaveEvery: 1
+Epipolar.DrawMatches: 1
+Epipolar.OutputDirectory: "outputs/epipolar"
+
+# RGB-D 三维静态补偿诊断：0=启用，1=关闭；缺失默认关闭。
+# 与 UseEpipolar 独立；仅诊断，尚未剔除特征。
+Dynamic.Use3DResidual: 0
+# camera motion source: tracking (default) or background_pnp (comparison)
+Dynamic.DepthPoseSource: "tracking"
+Residual3D.TrackingMinInliers: 25
+Residual3D.Debug: 1
+Residual3D.Visualize: 0
+Residual3D.OutputDirectory: "outputs/depth-tracking-refreshed"
+
+# Paper raw two-frame axial-depth gate; classification thresholds remain unchanged.
+Residual3D.UseDepthDifferenceGate: 1
+Residual3D.MaxDepthDifferenceM: 0.20
+
+# LK 局部跟踪交叉验证：0=启用，1=关闭；缺失默认关闭。
+# 仅输出独立证据，不改变匹配、原几何分类或特征关联。
+Dynamic.UseLKCheck: 0
+LKCheck.OutputDirectory: "outputs/lk-check-tum3-default"
+# Visualize 为普通标志：1=保存图片，0=不保存图片。
+LKCheck.Visualize: 1
+LKCheck.SaveEvery: 10
+LKCheck.MaxImagesPerFrame: 4
+# 以下为已验证的实验初值，不宣称适用于所有场景。
+LKCheck.WinSize: 21
+LKCheck.MaxLevel: 3
+LKCheck.Iterations: 30
+LKCheck.Epsilon: 0.01
+LKCheck.MinEigThreshold: 0.0001
+LKCheck.MaxFBErrorPx: 1.0
+LKCheck.MaxEndpointErrorPx: 3.0
+LKCheck.MaxDt: 0.2
+# 保留多次运行结果时，为各诊断模块指定新的输出目录；固定目录会覆盖同名日志。

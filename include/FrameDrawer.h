@@ -29,6 +29,8 @@
 
 #include<mutex>
 #include <unordered_set>
+#include "DynamicFilterView.h"
+#include <fstream>
 
 
 namespace ORB_SLAM3
@@ -58,6 +60,12 @@ public:
                              const std::vector<cv::KeyPoint>& keys, double timestamp, int state, const std::vector<int>* instanceIds=nullptr);
     cv::Mat DrawSemanticFrame(float viewScale=1.f);
 
+    // Uses the existing Current Frame window; image, masks and counts are published atomically.
+    void ConfigureDynamicFilterView(const std::string& output,int saveEvery=10);
+    void UpdateDynamicFilterFrame(const cv::Mat&,bool inputIsRGB,const DynamicFilterView&);
+    bool GetDynamicFilterSnapshot(cv::Mat& image,DynamicFilterView& view);
+    static cv::Mat RenderDynamicFilterFrame(const cv::Mat& bgr,const DynamicFilterView&,float scale=1.f);
+
     bool both;
 
 protected:
@@ -81,6 +89,13 @@ protected:
 
     std::mutex mMutex;
     std::mutex mSemanticMutex;
+    std::mutex mDynamicMutex,mDynamicWriterMutex;
+    cv::Mat mDynamicRGB;
+    DynamicFilterView mDynamicView;
+    bool mbDynamicReady=false;
+    std::string mDynamicOutput;
+    int mDynamicSaveEvery=10;
+    std::ofstream mDynamicFrames,mDynamicObservations;
     bool mbSemanticView=false;
     cv::Mat mSemanticPreview;
     vector<pair<cv::Point2f, cv::Point2f> > mvTracks;

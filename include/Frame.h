@@ -33,6 +33,7 @@
 #include "Converter.h"
 #include "Settings.h"
 #include "SemanticMasker.h"
+#include "DynamicFilterView.h"
 
 #include <mutex>
 #include <opencv2/opencv.hpp>
@@ -226,6 +227,10 @@ public:
     // Indexed exactly as descriptors/raw mvKeys. Disabled/unqueried = -1.
     bool mbInstanceAssociation=false;
     std::vector<int> mvInstanceIds;
+    std::vector<bool> mvbDynamicCandidate, mvbDynamicExcluded;
+    std::vector<int> mvPoseOptimizationIndices;
+    PoseObservationAudit mPoseObservationAudit;
+    bool DynamicExcluded(size_t i) const {return i<mvbDynamicExcluded.size() && mvbDynamicExcluded[i];}
     std::vector<InstanceInfo> mvInstanceInfo;
     void AssociateInstances(const SemanticResult& result, cv::Size rawImageSize);
 

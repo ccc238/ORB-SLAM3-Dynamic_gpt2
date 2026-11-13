@@ -59,6 +59,12 @@ add_library(${PROJECT_NAME} SHARED
 src/System.cc
 src/Tracking.cc
 src/SemanticMasker.cc
+src/EpipolarMotionDetector.cc
+src/Residual3D.cc
+src/LKCheck.cc
+src/DynamicFilter.cc
+src/DynamicFilterView.cc
+src/DynamicFilterDrawer.cc
 src/LocalMapping.cc
 src/LoopClosing.cc
 src/ORBextractor.cc
@@ -415,4 +421,32 @@ if(BUILD_SEMANTIC_TESTS)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
     add_executable(semantic_mask_test tests/semantic_mask_test.cc)
     target_link_libraries(semantic_mask_test ${PROJECT_NAME})
+endif()
+
+option(BUILD_EPIPOLAR_TESTS "Build epipolar diagnostic verification" OFF)
+if(BUILD_EPIPOLAR_TESTS)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
+    add_executable(epipolar_motion_test tests/epipolar_motion_test.cc)
+    target_link_libraries(epipolar_motion_test ${PROJECT_NAME})
+endif()
+
+option(BUILD_RESIDUAL3D_TESTS "Build RGB-D 3D residual verification" OFF)
+if(BUILD_RESIDUAL3D_TESTS)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
+    add_executable(residual3d_test tests/residual3d_test.cc)
+    target_link_libraries(residual3d_test ${PROJECT_NAME})
+    add_executable(depth_pose_lifecycle_test tests/depth_pose_lifecycle_test.cc)
+    target_link_libraries(depth_pose_lifecycle_test ${PROJECT_NAME})
+endif()
+
+option(BUILD_LK_CHECK_TESTS "Build independent LK cross-check verification" OFF)
+if(BUILD_LK_CHECK_TESTS)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
+    add_executable(lk_check_test tests/lk_check_test.cc)
+    target_link_libraries(lk_check_test ${PROJECT_NAME})
+endif()
+
+if(BUILD_LK_CHECK_TESTS)
+    add_executable(dynamic_filter_test tests/dynamic_filter_test.cc)
+    target_link_libraries(dynamic_filter_test ${PROJECT_NAME})
 endif()

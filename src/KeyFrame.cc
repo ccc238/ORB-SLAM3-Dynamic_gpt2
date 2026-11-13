@@ -61,6 +61,8 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     mvLeftToRightMatch(F.mvLeftToRightMatch),mvRightToLeftMatch(F.mvRightToLeftMatch), mTlr(F.GetRelativePoseTlr()),
     mvKeysRight(F.mvKeysRight), NLeft(F.Nleft), NRight(F.Nright), mTrl(F.GetRelativePoseTrl()), mnNumberOfOpt(0), mbHasVelocity(false)
 {
+    mvbDynamicExcluded=F.mvbDynamicExcluded;
+    for(size_t i=0;i<mvpMapPoints.size();++i) if(DynamicExcluded(i)) mvpMapPoints[i]=nullptr;
     mnId=nNextId++;
 
     mGrid.resize(mnGridCols);
@@ -296,6 +298,7 @@ int KeyFrame::GetNumberMPs()
 
 void KeyFrame::AddMapPoint(MapPoint *pMP, const size_t &idx)
 {
+    if(DynamicExcluded(idx)) return;
     unique_lock<mutex> lock(mMutexFeatures);
     mvpMapPoints[idx]=pMP;
 }
@@ -732,6 +735,7 @@ vector<size_t> KeyFrame::GetFeaturesInArea(const float &x, const float &y, const
             const vector<size_t> vCell = (!bRight) ? mGrid[ix][iy] : mGridRight[ix][iy];
             for(size_t j=0, jend=vCell.size(); j<jend; j++)
             {
+                if(DynamicExcluded(vCell[j])) continue;
                 const cv::KeyPoint &kpUn = (NLeft == -1) ? mvKeysUn[vCell[j]]
                                                          : (!bRight) ? mvKeys[vCell[j]]
                                                                      : mvKeysRight[vCell[j]];

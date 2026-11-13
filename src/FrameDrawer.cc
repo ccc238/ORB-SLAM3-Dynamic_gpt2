@@ -118,6 +118,9 @@ cv::Mat FrameDrawer::DrawSemanticFrame(float viewScale)
 
 cv::Mat FrameDrawer::DrawFrame(float imageScale)
 {
+    cv::Mat dynamicImage;DynamicFilterView dynamicView;
+    if(GetDynamicFilterSnapshot(dynamicImage,dynamicView))
+        return RenderDynamicFilterFrame(dynamicImage,dynamicView,1.f/imageScale);
     cv::Mat im;
     vector<cv::KeyPoint> vIniKeys; // Initialization: KeyPoints in reference frame
     vector<int> vMatches; // Initialization: correspondeces with reference keypoints
