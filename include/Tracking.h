@@ -58,7 +58,6 @@ class Settings;
 class Tracking
 {
     std::unique_ptr<DynamicFilter> mDynamicFilter;
-    std::string mDynamicFilterMode="simulate";
     std::function<void(Map*,bool)> mBeforeDynamicCommit;
     std::unique_ptr<EpipolarMotionDetector> mEpipolarDetector;
     EpipolarResult mEpipolarResult;
@@ -68,6 +67,7 @@ class Tracking
     Residual3DConfig mResidual3DConfig;
     EpipolarConfig mDiagnosticEpipolarConfig;
     Residual3DResult mResidual3DResult;
+    int mPersonFeatureBoost=0, mPersonFeatureErode=8;
     TrackingDepthPose mDepthTrackingPose,mPreviousDepthTrackingPose;
     KeyFrame* mDepthPoseReference=nullptr; // Same lifetime policy as mlpReferences; cleared by every map/reset hook.
     long mDepthTrackingInlierFrame=-1;

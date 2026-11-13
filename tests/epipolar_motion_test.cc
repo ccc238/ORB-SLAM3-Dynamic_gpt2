@@ -1,6 +1,8 @@
 #include "EpipolarMotionDetector.h"
 #include "SemanticMasker.h"
+#include "ORBextractor.h"
 #include <opencv2/calib3d.hpp>
+#include <opencv2/imgproc.hpp>
 #include <iostream>
 #include <cmath>
 #include <stdexcept>
@@ -99,6 +101,42 @@ int main() {
     auto next=gap; next.frameId=2;next.timestamp+=1/30.;Check(d.Process(next).previousFrameId==1,"cache recovery");
     d.Reset();d.Process(Input(0));auto resized=Input(1);resized.size={320,240};Unknown(d.Process(resized),120);
     d.Reset();d.Process(Input(0));auto calibration=Input(1);calibration.K.at<double>(0,0)=510;Check(d.Process(calibration).reason=="INCOMPATIBLE_INPUT","calibration reset");
+    cv::Mat texture(480,640,CV_8UC1);cv::RNG textureRng(9901);textureRng.fill(texture,cv::RNG::UNIFORM,0,256);
+    cv::GaussianBlur(texture,texture,cv::Size(3,3),0.7);
+    cv::Mat shifted,translation=(cv::Mat_<double>(2,3)<<1,0,5,0,1,-3);
+    cv::warpAffine(texture,shifted,translation,texture.size());
+    cv::Ptr<cv::ORB> orb=cv::ORB::create(900);
+    EpipolarInput previous,current;previous.frameId=0;current.frameId=1;previous.timestamp=0;current.timestamp=1./30.;
+    previous.size=current.size=texture.size();previous.K=current.K=(cv::Mat_<double>(3,3)<<500,0,320,0,500,240,0,0,1);
+    previous.distortion=current.distortion=cv::Mat::zeros(4,1,CV_64F);
+    orb->detectAndCompute(texture,cv::noArray(),previous.rawKeys,previous.descriptors);
+    orb->detectAndCompute(shifted,cv::noArray(),current.rawKeys,current.descriptors);
+    previous.undistortedKeys=previous.rawKeys;current.undistortedKeys=current.rawKeys;
+    for(const auto& key:previous.rawKeys) previous.instances.push_back(key.pt.x>160&&key.pt.x<480&&key.pt.y>80&&key.pt.y<420?1:0);
+    for(const auto& key:current.rawKeys) current.instances.push_back(key.pt.x>160&&key.pt.x<480&&key.pt.y>80&&key.pt.y<420?1:0);
+    std::vector<cv::KeyPoint> duplicateKeys;
+    std::vector<cv::Mat> duplicateDescriptors;
+    for(size_t i=0;i<current.rawKeys.size();++i) if(current.instances[i]>0) {
+        cv::KeyPoint duplicate=current.rawKeys[i];duplicate.pt.x+=22;
+        if(duplicate.pt.x<620) {duplicateKeys.push_back(duplicate);duplicateDescriptors.push_back(current.descriptors.row(static_cast<int>(i)).clone());}
+    }
+    if(!duplicateKeys.empty()) {
+        cv::Mat additions;cv::vconcat(duplicateDescriptors,additions);
+        current.descriptors.push_back(additions);
+        for(const auto& key:duplicateKeys) {current.rawKeys.push_back(key);current.undistortedKeys.push_back(key);current.instances.push_back(1);}
+    }
+    DiagnosticMatcher ordinary;ordinary.Process(previous,.75,.2,texture);
+    const auto ordinaryResult=ordinary.Process(current,.75,.2,shifted).matching;
+    EpipolarConfig assistedConfig;assistedConfig.lkAssistedMatching=true;assistedConfig.lkSearchRadius=8;
+    DiagnosticMatcher assisted;assisted.Configure(assistedConfig);assisted.Process(previous,.75,.2,texture);
+    const auto assistedResult=assisted.Process(current,.75,.2,shifted).matching;
+    Check(assistedResult.assistedMatches>0&&assistedResult.matches>ordinaryResult.matches,"LK-assisted matching did not recover ambiguous local ORB matches");
+    cv::Mat focusMask=cv::Mat::zeros(texture.size(),CV_8UC1);cv::rectangle(focusMask,cv::Rect(160,80,320,340),cv::Scalar(255),cv::FILLED);
+    ORBextractor focusedExtractor(1000,1.2f,8,20,7);std::vector<cv::KeyPoint> focusedKeys;cv::Mat focusedDescriptors;std::vector<int> lapping={0,0};
+    focusedExtractor(texture,focusMask,focusedKeys,focusedDescriptors,lapping,200);
+    Check(!focusedKeys.empty()&&focusedKeys.size()<=200&&focusedDescriptors.rows==int(focusedKeys.size()),"person-region feature extraction budget");
+    for(const auto& key:focusedKeys) Check(focusMask.at<uchar>(cvFloor(key.pt.y),cvFloor(key.pt.x))!=0,"focused ORB escaped person region");
+    std::cout<<"PASS LK-assisted matching recovered "<<assistedResult.assistedMatches<<" ambiguous local correspondences; person-region ORB="<<focusedKeys.size()<<'\n';
     std::cout << "PASS configuration, prerequisites, F direction, sqrt Sampson, perturbation, model, mapping, per-frame IDs, distorted/raw coordinate separation, tri-state, ownership, immutability, RNG, first/empty/insufficient/degenerate/planar/reset/time/calibration/size\n";
     return 0;
  } catch(const std::exception& e) {std::cerr << e.what() << '\n';return 1;}

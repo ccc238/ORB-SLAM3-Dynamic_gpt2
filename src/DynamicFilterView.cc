@@ -7,12 +7,12 @@ namespace ORB_SLAM3 {
 int DynamicFilterView::CandidateCount() const {return std::count(candidates.begin(),candidates.end(),true);}
 int DynamicFilterView::ExcludedCount() const {return std::count(excludedObservations.begin(),excludedObservations.end(),true);}
 DynamicFilterView MakeDynamicFilterView(const Frame& f,const std::vector<int>& qualification,
-    const PoseObservationAudit& initialAudit,bool enabled,const std::string& mode,
+    const PoseObservationAudit& initialAudit,bool enabled,
     bool accepted,bool executed,const std::string& reason) {
     DynamicFilterView v;
     v.frameId=f.mnId;v.timestamp=f.mTimeStamp;v.keys=f.mvKeys;
-    v.enabled=enabled;v.mode=mode;v.accepted=accepted;v.executed=executed;v.reason=reason;
-    v.status=accepted?"ACCEPTED":(reason.find("ROLLBACK")!=std::string::npos?"ROLLED_BACK":(enabled&&mode=="simulate"?"SIMULATE":"SKIPPED"));
+    v.enabled=enabled;v.accepted=accepted;v.executed=executed;v.reason=reason;
+    v.status=accepted?"ACCEPTED":(reason.find("ROLLBACK")!=std::string::npos?"ROLLED_BACK":"SKIPPED");
     v.candidates.assign(v.keys.size(),false);v.excludedObservations.assign(v.keys.size(),false);
     if(enabled&&f.mvbDynamicCandidate.size()==v.keys.size())v.candidates=f.mvbDynamicCandidate;
     v.qualificationAvailable=initialAudit.constructed&&initialAudit.frameId==v.frameId&&initialAudit.timestamp==v.timestamp;

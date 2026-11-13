@@ -778,12 +778,25 @@ namespace ORB_SLAM3
         return vResultKeys;
     }
 
-    void ORBextractor::ComputeKeyPointsOctTree(vector<vector<KeyPoint> >& allKeypoints)
+    void ORBextractor::ComputeKeyPointsOctTree(vector<vector<KeyPoint> >& allKeypoints, int featureLimit)
     {
         allKeypoints.resize(nlevels);
 
         const float W = 35;
         maskCandidates=maskRejected=0;
+        std::vector<int> levelFeatures=mnFeaturesPerLevel;
+        if(featureLimit>0 && featureLimit!=nfeatures) {
+            levelFeatures.assign(nlevels,0);
+            const float factor=1.0f/scaleFactor;
+            float desired=featureLimit*(1-factor)/(1-static_cast<float>(pow(static_cast<double>(factor),nlevels)));
+            int sum=0;
+            for(int level=0;level<nlevels-1;++level) {
+                levelFeatures[level]=cvRound(desired);
+                sum+=levelFeatures[level];
+                desired*=factor;
+            }
+            levelFeatures[nlevels-1]=std::max(featureLimit-sum,0);
+        }
 
         for (int level = 0; level < nlevels; ++level)
         {
@@ -894,7 +907,7 @@ namespace ORB_SLAM3
             keypoints.reserve(nfeatures);
 
             keypoints = DistributeOctTree(vToDistributeKeys, minBorderX, maxBorderX,
-                                          minBorderY, maxBorderY,mnFeaturesPerLevel[level], level);
+                                          minBorderY, maxBorderY,levelFeatures[level], level);
 
             const int scaledPatchSize = PATCH_SIZE*mvScaleFactor[level];
 
@@ -916,6 +929,27 @@ namespace ORB_SLAM3
                 int x=cvFloor(k.pt.x*mvScaleFactor[level]), y=cvFloor(k.pt.y*mvScaleFactor[level]);
                 return x<0 || y<0 || x>=mValidMask.cols || y>=mValidMask.rows || !mValidMask.at<uchar>(y,x);
             }),keys.end());
+        }
+        if(featureLimit>0) {
+            std::vector<std::pair<float,std::pair<int,int>>> ranked;
+            size_t total=0;
+            for(int level=0;level<nlevels;++level) {
+                total+=allKeypoints[level].size();
+                for(size_t index=0;index<allKeypoints[level].size();++index)
+                    ranked.push_back({allKeypoints[level][index].response,{level,static_cast<int>(index)}});
+            }
+            if(total>static_cast<size_t>(featureLimit)) {
+                std::stable_sort(ranked.begin(),ranked.end(),
+                    [](const std::pair<float,std::pair<int,int>>& a,const std::pair<float,std::pair<int,int>>& b) {
+                        return a.first>b.first;
+                    });
+                std::vector<std::vector<KeyPoint>> capped(nlevels);
+                for(size_t i=0;i<static_cast<size_t>(featureLimit);++i) {
+                    const int level=ranked[i].second.first,index=ranked[i].second.second;
+                    capped[level].push_back(allKeypoints[level][index]);
+                }
+                allKeypoints.swap(capped);
+            }
         }
         // compute orientations
         for (int level = 0; level < nlevels; ++level)
@@ -1111,7 +1145,7 @@ namespace ORB_SLAM3
     }
 
     int ORBextractor::operator()( InputArray _image, InputArray _mask, vector<KeyPoint>& _keypoints,
-                                  OutputArray _descriptors, std::vector<int> &vLappingArea)
+                                  OutputArray _descriptors, std::vector<int> &vLappingArea, int featureLimit)
     {
         //cout << "[ORBextractor]: Max Features: " << nfeatures << endl;
         if(_image.empty())
@@ -1127,7 +1161,8 @@ namespace ORB_SLAM3
         ComputePyramid(image);
 
         vector < vector<KeyPoint> > allKeypoints;
-        ComputeKeyPointsOctTree(allKeypoints);
+        if(featureLimit<0) CV_Error(cv::Error::StsBadArg,"ORB feature limit cannot be negative");
+        ComputeKeyPointsOctTree(allKeypoints,featureLimit);
         //ComputeKeyPointsOld(allKeypoints);
 
         Mat descriptors;

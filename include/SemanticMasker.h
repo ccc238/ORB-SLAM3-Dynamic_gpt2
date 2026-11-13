@@ -22,6 +22,7 @@ struct SemanticConfig {
     std::vector<int> classes{0};
     float confidence=0.25f, iou=0.7f;
     int maxDetections=300, dilation=0;
+    int personFeatureBoost=0, personFeatureErode=8;
     // Dynamic.* gates the existing online pipeline; absent parameters disable it.
     static SemanticConfig Read(const std::string& settings);
 };

@@ -56,7 +56,8 @@ public:
     // Optional CV_8UC1 mask: 255 allows a keypoint center, 0 excludes it.
     int operator()( cv::InputArray _image, cv::InputArray _mask,
                     std::vector<cv::KeyPoint>& _keypoints,
-                    cv::OutputArray _descriptors, std::vector<int> &vLappingArea);
+                    cv::OutputArray _descriptors, std::vector<int> &vLappingArea,
+                    int featureLimit=0);
 
     int inline GetLevels(){
         return nlevels;}
@@ -88,7 +89,7 @@ protected:
     cv::Mat mValidMask;
 
     void ComputePyramid(cv::Mat image);
-    void ComputeKeyPointsOctTree(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);    
+    void ComputeKeyPointsOctTree(std::vector<std::vector<cv::KeyPoint> >& allKeypoints, int featureLimit=0);
     std::vector<cv::KeyPoint> DistributeOctTree(const std::vector<cv::KeyPoint>& vToDistributeKeys, const int &minX,
                                            const int &maxX, const int &minY, const int &maxY, const int &nFeatures, const int &level);
 
@@ -114,4 +115,3 @@ protected:
 } //namespace ORB_SLAM
 
 #endif
-

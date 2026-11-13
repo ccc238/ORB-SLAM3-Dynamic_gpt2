@@ -12,27 +12,27 @@
 #include <algorithm>
 #include <stdexcept>
 #include <iomanip>
-#include <cstring>
 namespace ORB_SLAM3 {
 DynamicFilterConfig DynamicFilterConfig::Read(cv::FileStorage& fs) {
     DynamicFilterConfig c;
+    const auto keys=fs.root().isMap()?fs.root().keys():std::vector<std::string>();
+    auto present=[&](const char* key){return std::find(keys.begin(),keys.end(),key)!=keys.end();};
     auto n=fs["Dynamic.UseDynamicFilter"];
-    if(!n.empty()) {
+    if(present("Dynamic.UseDynamicFilter")) {
         if(!n.isInt() || (int(n)!=0 && int(n)!=1)) throw std::runtime_error("Dynamic.UseDynamicFilter must be integer 0 (enabled) or 1 (disabled)");
         c.raw=int(n);
     }
     c.enabled=c.raw==0;
-    n=fs["Dynamic.FilterMode"];
-    if(!n.empty()) {if(!n.isString()) throw std::runtime_error("Dynamic.FilterMode must be string");c.mode=std::string(n);}
-    if(c.mode!="simulate" && c.mode!="apply") throw std::runtime_error("Dynamic.FilterMode must be simulate or apply");
+    if(present("Dynamic.FilterMode"))
+        std::cerr<<"WARNING: Dynamic.FilterMode 已废弃 (deprecated)，不会生效 (ignored). "
+                 <<"Dynamic.UseDynamicFilter=0 now enables real filtering directly; 1 or missing disables it."<<std::endl;
     auto number=[&](const char* key,double& value) {auto v=fs[key];if(!v.empty()){if(!v.isReal()&&!v.isInt())throw std::runtime_error(std::string(key)+" must be numeric");value=double(v);}};
     number("Dynamic.FilterMaxRatio",c.maxRatio);
     auto integer=[&](const char* key,int& value){auto v=fs[key];if(!v.empty()){if(!v.isInt())throw std::runtime_error(std::string(key)+" must be integer");value=int(v);}};
     integer("Dynamic.FilterMinRemaining",c.minRemaining);integer("Dynamic.FilterMinFinalInliers",c.minFinalInliers);integer("Dynamic.FilterMinCells",c.minCells);
     n=fs["Dynamic.FilterOutputDirectory"];if(!n.empty()){if(!n.isString())throw std::runtime_error("FilterOutputDirectory must be string");c.output=std::string(n);}
     if(!std::isfinite(c.maxRatio)||c.maxRatio<=0||c.maxRatio>=1||c.minRemaining<3||c.minFinalInliers<30||c.minCells<1||c.minCells>12)throw std::runtime_error("Invalid Dynamic filter safety limits (final inliers >=30)");
-    std::cout<<"Dynamic.FilterMode raw="<<(fs["Dynamic.FilterMode"].empty()?"missing":c.mode)<<" ";
-    std::cout<<"Dynamic.UseDynamicFilter raw="<<(fs["Dynamic.UseDynamicFilter"].empty()?"missing":std::to_string(c.raw))<<" filter_enabled="<<c.enabled<<" filter_mode="<<c.mode<<std::endl;
+    std::cout<<"Dynamic.UseDynamicFilter raw="<<(fs["Dynamic.UseDynamicFilter"].empty()?"missing":std::to_string(c.raw))<<" enabled="<<c.enabled<<std::endl;
     return c;
 }
 std::vector<DynamicCandidate> ConservativeCandidates(const EpipolarInput& in,const DiagnosticPair& pair,const EpipolarResult& e,const Residual3DResult& d,const LKCheckResult& lk) {
@@ -58,26 +58,24 @@ std::vector<DynamicCandidate> ConservativeCandidates(const EpipolarInput& in,con
     return out;
 }
 DynamicFilter::DynamicFilter(const DynamicFilterConfig& c):c_(c) {
+    if(!c_.enabled)return;
     EnsureSemanticDirectory(c.output);
     frames_.open(c.output+"/frames.csv");features_.open(c.output+"/features.csv");
     poses_.open(c.output+"/poses.csv");
     poses_<<"frame_id,stage,r0c0,r0c1,r0c2,tx,r1c0,r1c1,r1c2,ty,r2c0,r2c1,r2c2,tz\n";
     if(!poses_||!frames_||!features_)throw std::runtime_error("DynamicFilter: cannot open logs");
     frames_<<std::setprecision(17);features_<<std::setprecision(17);poses_<<std::setprecision(17);
-    frames_<<"frame_id,filter_enabled,filter_mode,eligible,candidates,optimizable_candidates,original_outlier_candidates,original_inlier_candidates,pre_edges,pre_inliers,final_edges,final_inliers,safety,reason,executed,accepted,translation_m,rotation_rad,compute_ms,record_ms,total_ms,attempted_edges,attempted_inliers,remaining_cells,simulation_unchanged\n";
+    frames_<<"frame_id,enabled,eligible,candidates,optimizable_candidates,original_outlier_candidates,original_inlier_candidates,pre_edges,pre_inliers,final_edges,final_inliers,safety,reason,executed,applied,actual_excluded,translation_m,rotation_rad,compute_ms,record_ms,total_ms,attempted_edges,attempted_inliers,remaining_cells\n";
     features_<<"frame_id,index,instance_id,previous_index,lk,epipolar_state,epipolar_residual,depth_state,residual3d,candidate,effective_excluded,reason,final_edge,allow_keyframe_observation,allow_new_point,previous_frame_id,current_x,current_y,lk_reason,epipolar_reason,depth_reason,epipolar_model_valid,motion_valid,previous_depth_valid,current_depth_valid,depth_difference_rejected,depth_difference_m\n";
 }
 void DynamicFilter::Process(Frame& f,const EpipolarInput& in,const DiagnosticPair& pair,const EpipolarResult& e,const Residual3DResult& d,const LKCheckResult& lk,bool eligible,int& trackingInliers,int requiredInliers) {
+    if(!c_.enabled) {
+        view_=MakeDynamicFilterView(f,f.mvPoseOptimizationIndices,f.mPoseObservationAudit,false,false,false,"FILTER_DISABLED");
+        return;
+    }
     if(long(in.frameId)!=long(f.mnId) || in.rawKeys.size()!=size_t(f.N))
         throw std::runtime_error("DynamicFilter: current frame changed during tracking");
     auto start=std::chrono::steady_clock::now();
-    const bool simulate=c_.mode=="simulate";
-    const auto originalPoints=f.mvpMapPoints;
-    const cv::Mat originalDescriptors=simulate?f.mDescriptors.clone():cv::Mat();
-    const auto originalDepth=f.mvDepth;
-    const auto originalKeys=f.mvKeys,originalUndistorted=f.mvKeysUn;
-    std::vector<std::vector<size_t>> originalGrid;
-    if(simulate) for(int x=0;x<FRAME_GRID_COLS;++x) for(int y=0;y<FRAME_GRID_ROWS;++y) originalGrid.push_back(f.mGrid[x][y]);
     const std::set<int> originalEdgeSet(f.mvPoseOptimizationIndices.begin(),f.mvPoseOptimizationIndices.end());
     auto candidates=ConservativeCandidates(in,pair,e,d,lk);
     f.mvbDynamicCandidate.assign(f.N,false);f.mvbDynamicExcluded.assign(f.N,false);
@@ -99,9 +97,9 @@ void DynamicFilter::Process(Frame& f,const EpipolarInput& in,const DiagnosticPai
         else if(double(optimizable)/std::max(1,edges)>c_.maxRatio || double(originalIn)/std::max(1,preIn)>c_.maxRatio)reason="MAX_EXCLUSION_RATIO";
         else if(preIn-originalIn<c_.minRemaining)reason="INSUFFICIENT_REMAINING_INLIERS";
         else if(int(cells.size())<c_.minCells)reason="INSUFFICIENT_SPATIAL_COVERAGE";
-        else {safe=true;reason=c_.mode=="simulate"?"SIMULATE_ONLY":"ACCEPTED";}
+        else {safe=true;reason="ACCEPTED";}
     }
-    if(safe&&c_.mode=="apply"){
+    if(safe){
         f.mvbDynamicExcluded=f.mvbDynamicCandidate;
         executed=true;
         const int optimizationResult=Optimizer::PoseOptimization(&f);
@@ -121,17 +119,7 @@ void DynamicFilter::Process(Frame& f,const EpipolarInput& in,const DiagnosticPai
             reason=optimizationResult<0?"SOLVER_FAILED_ROLLBACK":"FINAL_SUPPORT_FAILED_ROLLBACK";safe=false;f.SetPose(pose);f.mvbOutlier=outliers;f.mvPoseOptimizationIndices=priorEdges;f.mPoseObservationAudit=priorAudit;f.mvbDynamicExcluded.assign(f.N,false);finalEdges=edges;finalIn=preIn;
         }else {accepted=true;trackingInliers=finalIn;cells=finalCells;}
     }
-    if(simulate) {
-        bool unchanged=f.mvpMapPoints==originalPoints&&(f.mvDepth.size()==originalDepth.size()&&(originalDepth.empty()||std::memcmp(f.mvDepth.data(),originalDepth.data(),originalDepth.size()*sizeof(float))==0))&&f.mvbOutlier==outliers&&f.mvPoseOptimizationIndices==priorEdges&&f.GetPose().matrix()==pose.matrix()&&f.mvKeys.size()==originalKeys.size()&&f.mvKeysUn.size()==originalUndistorted.size();
-        unchanged=unchanged&&f.mDescriptors.size()==originalDescriptors.size()&&f.mDescriptors.type()==originalDescriptors.type();
-        if(unchanged&&!originalDescriptors.empty()) unchanged=cv::norm(originalDescriptors,f.mDescriptors,cv::NORM_INF)==0;
-        auto equalKey=[](const cv::KeyPoint& a,const cv::KeyPoint& b){return a.pt==b.pt&&a.size==b.size&&a.angle==b.angle&&a.response==b.response&&a.octave==b.octave&&a.class_id==b.class_id;};
-        for(size_t i=0;unchanged&&i<originalKeys.size();++i)unchanged=equalKey(originalKeys[i],f.mvKeys[i]);
-        for(size_t i=0;unchanged&&i<originalUndistorted.size();++i)unchanged=equalKey(originalUndistorted[i],f.mvKeysUn[i]);
-        int cell=0;for(int x=0;unchanged&&x<FRAME_GRID_COLS;++x)for(int y=0;unchanged&&y<FRAME_GRID_ROWS;++y)unchanged=originalGrid[cell++]==f.mGrid[x][y];
-        if(!unchanged)throw std::runtime_error("DynamicFilter: simulate changed algorithm data");
-    }
-    view_=MakeDynamicFilterView(f,priorEdges,priorAudit,true,c_.mode,accepted,executed,reason);
+    view_=MakeDynamicFilterView(f,priorEdges,priorAudit,true,accepted,executed,reason);
     for(int stage=0;stage<2;++stage){const auto matrix=(stage?f.GetPose():pose).matrix();poses_<<f.mnId<<','<<(stage?"final":"preliminary");for(int y=0;y<3;++y)for(int x=0;x<4;++x)poses_<<','<<matrix(y,x);poses_<<'\n';}
     auto delta=f.GetPose()*pose.inverse();
     double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
@@ -153,12 +141,12 @@ void DynamicFilter::Process(Frame& f,const EpipolarInput& in,const DiagnosticPai
                  <<','<<(size_t(i)<d.features.size()?d.features[i].depthDifference:NAN)<<'\n';
         if(f.mvbDynamicCandidate[i]&&!picture.empty()){cv::circle(picture,f.mvKeys[i].pt,4,cv::Scalar(0,255,255),1);if(view_.excludedObservations[i])cv::drawMarker(picture,f.mvKeys[i].pt,{0,0,255},cv::MARKER_TILTED_CROSS,10,2);}
     }
-    if(!picture.empty()&&f.mnId%10==0){cv::rectangle(picture,{0,0},{picture.cols-1,58},{0,0,0},cv::FILLED);std::string label=c_.mode=="simulate"?"SIMULATE ONLY - NO FILTERING":accepted?"APPLY: red X=excluded edges; yellow=candidate":"APPLY: NOT APPLIED / ROLLBACK";cv::putText(picture,label,{8,22},cv::FONT_HERSHEY_SIMPLEX,.5,{255,255,255},1);cv::putText(picture,"candidates="+std::to_string(count)+" excluded="+std::to_string(view_.ExcludedCount())+" "+reason,{8,45},cv::FONT_HERSHEY_SIMPLEX,.4,{255,255,255},1);cv::imwrite(c_.output+"/frame_"+std::to_string(f.mnId)+".png",picture);}
+    if(!picture.empty()&&f.mnId%10==0){cv::rectangle(picture,{0,0},{picture.cols-1,58},{0,0,0},cv::FILLED);std::string label=accepted?"FILTER: red X=excluded edges; yellow=candidate":"FILTER: NOT APPLIED / ROLLBACK";cv::putText(picture,label,{8,22},cv::FONT_HERSHEY_SIMPLEX,.5,{255,255,255},1);cv::putText(picture,"candidates="+std::to_string(count)+" excluded="+std::to_string(view_.ExcludedCount())+" "+reason,{8,45},cv::FONT_HERSHEY_SIMPLEX,.4,{255,255,255},1);cv::imwrite(c_.output+"/frame_"+std::to_string(f.mnId)+".png",picture);}
     features_.flush();poses_.flush();
     double totalMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
-    frames_<<f.mnId<<",1,"<<c_.mode<<','<<eligible<<','<<count<<','<<optimizable<<','<<rejected<<','<<originalIn<<','<<edges<<','<<preIn<<','<<finalEdges<<','<<finalIn<<','<<safe<<','<<reason<<','<<executed<<','<<accepted<<','<<delta.translation().norm()<<','<<delta.so3().log().norm()<<','<<ms<<','<<(totalMs-ms)<<','<<totalMs<<','<<attemptedEdges<<','<<attemptedInliers<<','<<cells.size()<<','<<(simulate?1:-1)<<'\n';
+    frames_<<f.mnId<<",1,"<<eligible<<','<<count<<','<<optimizable<<','<<rejected<<','<<originalIn<<','<<edges<<','<<preIn<<','<<finalEdges<<','<<finalIn<<','<<safe<<','<<reason<<','<<executed<<','<<accepted<<','<<view_.ExcludedCount()<<','<<delta.translation().norm()<<','<<delta.so3().log().norm()<<','<<ms<<','<<(totalMs-ms)<<','<<totalMs<<','<<attemptedEdges<<','<<attemptedInliers<<','<<cells.size()<<'\n';
     frames_.flush();features_.flush();poses_.flush();
     if(!frames_||!features_||!poses_)throw std::runtime_error("DynamicFilter: log write failed");
-    std::cout<<"[DynamicFilter] frame="<<f.mnId<<" mode="<<c_.mode<<" candidates="<<count<<" optimizable="<<optimizable<<" accepted="<<accepted<<" reason="<<reason<<" ms="<<ms<<std::endl;
+    std::cout<<"[DynamicFilter] frame="<<f.mnId<<" enabled=1"<<" candidates="<<count<<" optimizable="<<optimizable<<" applied="<<accepted<<" actual_excluded="<<view_.ExcludedCount()<<" reason="<<reason<<" ms="<<ms<<std::endl;
 }
 }

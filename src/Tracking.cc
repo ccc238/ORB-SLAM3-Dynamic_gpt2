@@ -85,7 +85,9 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
     const auto semanticConfig = SemanticConfig::Read(strSettingPath);
-    mDynamicFilterMode=semanticConfig.dynamicFilter.mode;
+    mPersonFeatureBoost=semanticConfig.personFeatureBoost;
+    mPersonFeatureErode=semanticConfig.personFeatureErode;
+    mDiagnosticMatcher.Configure(semanticConfig.epipolar);
     if(sensor==System::RGBD) {
         cv::FileStorage displaySettings(strSettingPath,cv::FileStorage::READ);
         std::string output="outputs/dynamic-filter-view";
@@ -1605,6 +1607,21 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
         semantic=mSemanticMasker->Infer(imRGB,mbRGB);
         if(mSemanticMasker->MaskingEnabled()) cv::bitwise_not(semantic.blocked,validMask);
     }
+    cv::Mat personFeatureMask;
+    if(mSemanticMasker && mPersonFeatureBoost>0 && !semantic.instanceLabels.empty()) {
+        personFeatureMask=cv::Mat::zeros(semantic.instanceLabels.size(),CV_8UC1);
+        for(const auto& instance:semantic.instanceInfo) if(instance.classId==0) {
+            cv::Mat region;
+            cv::compare(semantic.instanceLabels,instance.instanceId,region,cv::CMP_EQ);
+            cv::bitwise_or(personFeatureMask,region,personFeatureMask);
+        }
+        if(mPersonFeatureErode>0 && cv::countNonZero(personFeatureMask)>0) {
+            const int diameter=2*mPersonFeatureErode+1;
+            cv::Mat kernel=cv::getStructuringElement(cv::MORPH_ELLIPSE,cv::Size(diameter,diameter));
+            cv::erode(personFeatureMask,personFeatureMask,kernel);
+        }
+        if(!validMask.empty()) cv::bitwise_and(personFeatureMask,validMask,personFeatureMask);
+    }
     mImGray = imRGB;
     cv::Mat imDepth = imD;
 
@@ -1627,9 +1644,12 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
 
     if (mSensor == System::RGBD)
-        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,nullptr,IMU::Calib(),validMask);
+        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,nullptr,IMU::Calib(),validMask,personFeatureMask,mPersonFeatureBoost);
     else if(mSensor == System::IMU_RGBD)
-        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib,validMask);
+        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib,validMask,personFeatureMask,mPersonFeatureBoost);
+    if(mCurrentFrame.mnFeatureBoostAdded>0)
+        std::cout<<"[PersonFeatureBoost] frame="<<mCurrentFrame.mnId<<" added="<<mCurrentFrame.mnFeatureBoostAdded
+                 <<" total="<<mCurrentFrame.N<<" base="<<mCurrentFrame.N-mCurrentFrame.mnFeatureBoostAdded<<std::endl;
 
 
 
@@ -1730,7 +1750,8 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
         const double ratio=mResidual3DDetector?mResidual3DConfig.ratio:mDiagnosticEpipolarConfig.ratio;
         const double maxDt=mResidual3DDetector?(mEpipolarDetector?std::max(mResidual3DConfig.maxDt,mDiagnosticEpipolarConfig.maxDt):mResidual3DConfig.maxDt):mDiagnosticEpipolarConfig.maxDt;
         DiagnosticPair pair;
-        if(mEpipolarDetector || mResidual3DDetector) pair=mDiagnosticMatcher.Process(input,ratio,maxDt);
+        if(mEpipolarDetector || mResidual3DDetector)
+            pair=mDiagnosticMatcher.Process(input,ratio,maxDt,mImGray);
         if(mEpipolarDetector) mEpipolarResult=mEpipolarDetector->Process(input,imRGB,mbRGB,&pair);
         if(mLKCheck) {
             lkInput=input;lkInput.descriptors.release(); // vectors have value ownership; no descriptor copy is needed by LK.
@@ -1773,11 +1794,11 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
     filterView.keys=mCurrentFrame.mvKeys;
     filterView.candidates.assign(filterView.keys.size(),false);
     filterView.excludedObservations.assign(filterView.keys.size(),false);
-    filterView.enabled=bool(mDynamicFilter);filterView.mode=mDynamicFilterMode;
+    filterView.enabled=bool(mDynamicFilter);
     mBeforeDynamicCommit=[&](Map* map,bool eligible) {
         if(!mDynamicFilter || !pendingTrackingDepth || depthEpoch!=mDepthDiagnosticEpoch) {
             filterView=MakeDynamicFilterView(mCurrentFrame,mCurrentFrame.mvPoseOptimizationIndices,
-                mCurrentFrame.mPoseObservationAudit,bool(mDynamicFilter),mDynamicFilterMode,false,false,
+                mCurrentFrame.mPoseObservationAudit,bool(mDynamicFilter),false,false,
                 mDynamicFilter?"DIAGNOSTIC_UNAVAILABLE":"FILTER_DISABLED");
             viewCaptured=true;
             return;
@@ -1808,7 +1829,7 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
     }
     if(!viewCaptured && filterView.frameId==long(mCurrentFrame.mnId) && filterView.keys.size()==size_t(mCurrentFrame.N)) {
         filterView=MakeDynamicFilterView(mCurrentFrame,mCurrentFrame.mvPoseOptimizationIndices,
-            mCurrentFrame.mPoseObservationAudit,bool(mDynamicFilter),mDynamicFilterMode,false,false,
+            mCurrentFrame.mPoseObservationAudit,bool(mDynamicFilter),false,false,
             mDynamicFilter?"INITIALIZATION_OR_EARLY_RETURN":"FILTER_DISABLED");
     }
     if(mSensor==System::RGBD)mpFrameDrawer->UpdateDynamicFilterFrame(imRGB,mbRGB,filterView);

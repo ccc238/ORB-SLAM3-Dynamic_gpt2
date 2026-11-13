@@ -10,8 +10,11 @@ namespace ORB_SLAM3 {
 struct EpipolarConfig {
     int configuredValue=1; // User convention: 0=启用，1=关闭. Startup only.
     bool enabled=false, debug=false, visualize=false, drawMatches=true;
+    bool lkAssistedMatching=false;
     int every=1, minBackground=30, minInliers=20;
+    int lkWindow=21, lkMaxLevel=3, lkSearchRadius=8, lkMaxDescriptorDistance=72;
     double ratio=0.75, ransacPx=1.5, confidence=0.99, minInlierRatio=0.5;
+    double lkMaxForwardBackward=1.5, lkDescriptorRatio=0.9;
     double lowPx=1, highPx=3, maxDt=0.2, minCoverage=0.15;
     double minDisplacementPx=0.5, homographyRatio=0.9;
     std::string output="outputs/epipolar";
@@ -26,6 +29,7 @@ struct EpipolarFeature {
     std::string reason="NO_MATCH";
     // -1: not in background set, 0/1: background RANSAC outlier/inlier.
     int backgroundInlier=-1;
+    std::string matchSource="NONE";
 };
 struct EpipolarInput {
     std::vector<cv::KeyPoint> rawKeys, undistortedKeys;
@@ -46,6 +50,7 @@ struct EpipolarResult {
     std::string reason="NO_PREVIOUS_FRAME";
     int matches=0, background=0, inliers=0;
     double inlierRatio=0, coverage=0, medianDisplacement=0, homographySupport=0;
+    int assistedMatches=0;
     double matchMs=0, estimateMs=0, residualMs=0;
 };
 struct DiagnosticPair {
@@ -54,10 +59,15 @@ struct DiagnosticPair {
 };
 class DiagnosticMatcher {
 public:
+    DiagnosticMatcher();
     DiagnosticPair Process(const EpipolarInput& current, double ratio, double maxDt);
-    void Reset() { previous_=EpipolarInput(); havePrevious_=false; }
+    DiagnosticPair Process(const EpipolarInput& current, double ratio, double maxDt, const cv::Mat& gray);
+    void Configure(const EpipolarConfig& config) { config_=config; }
+    void Reset() { previous_=EpipolarInput(); previousGray_.release(); havePrevious_=false; }
 private:
+    EpipolarConfig config_;
     EpipolarInput previous_;
+    cv::Mat previousGray_;
     bool havePrevious_=false;
 };
 class EpipolarMotionDetector {

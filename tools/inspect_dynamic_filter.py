@@ -52,11 +52,10 @@ def main():
                 cx=min(3,max(0,int(4*x/w)));cy=min(2,max(0,int(3*y/h)))
                 cell[(cx,cy)][0]+=1;cell[(cx,cy)][1]+=excluded
             panel=Image.new("RGB",(w,h+110),"black");panel.paste(image,(0,110));draw=ImageDraw.Draw(panel)
-            if fr['filter_mode']=='simulate':title='SIMULATE ONLY - NO FILTERING'
-            elif fr['accepted']=='1':title='APPLY ACCEPTED - RED = EFFECTIVELY EXCLUDED'
-            else:title='APPLY NOT ACCEPTED - NO EXCLUSION / ROLLBACK'
+            if fr.get('applied',fr.get('accepted'))=='1':title='FILTER APPLIED - RED = EFFECTIVELY EXCLUDED'
+            else:title='FILTER NOT APPLIED - NO EXCLUSION / ROLLBACK'
             lines=[title,'YELLOW = CANDIDATE; labels = original feature indices',
-                   f"frame={index} candidates={fr['candidates']} optimizer_candidates={fr['optimizable_candidates']} accepted={fr['accepted']}", fr['reason']]
+                   f"frame={index} candidates={fr['candidates']} optimizer_candidates={fr['optimizable_candidates']} applied={fr.get('applied',fr.get('accepted'))}", fr['reason']]
             for j,line in enumerate(lines):draw.text((8,8+24*j),line,fill="white",font=font)
             panel.save(output/f"frame_{index}.png")
             for cy in range(3):

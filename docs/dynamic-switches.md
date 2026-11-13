@@ -59,3 +59,5 @@ python3 tools/validate_dynamic_switches.py
 三维启用时 `Dynamic.DepthPoseSource` 缺失默认 `tracking`；仅接受字符串 `tracking` / `background_pnp`。`Residual3D.TrackingMinInliers` 默认 25，使用当前帧 TrackLocalMap 优化后的真实 `mnMatchesInliers` 和计数帧号戳。无效 Tracking 输出 UNKNOWN，不回退 PnP。详见 [位姿来源](depth-pose-sources.md)。
 
 深度差审计新增普通布尔开关 `Residual3D.UseDepthDifferenceGate`（1 开、0 关，缺失默认 0）及 `Residual3D.MaxDepthDifferenceM`（默认 0.20 m）；现有相机 YAML 显式开启。它与单帧深度窗口检查不同，排除样本保留 raw 残差，正式状态为 UNKNOWN。缓存刷新与排除审计见 [审计说明](depth-residual-audit.md)。
+
+动态过滤现仅保留 `Dynamic.UseDynamicFilter`：整数 0 开启真实过滤；整数 1 或缺失关闭；其他值/类型报错。`Dynamic.FilterMode` 已废弃，残留会明确警告且不生效，不会重新启用模拟。安全检查、重优化、接受/完整回退和地图提交保护保持原样。启用过滤不替代分割、关联、对极、三维和 LK 各自的依赖开关。详见 [运行说明](conservative-dynamic-filter.md)。

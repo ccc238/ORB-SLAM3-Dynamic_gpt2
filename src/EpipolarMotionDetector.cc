@@ -3,6 +3,7 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/video/tracking.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -55,7 +56,14 @@ EpipolarConfig EpipolarConfig::Read(cv::FileStorage& fs,bool segmentation,bool a
     if(!c.enabled) return c;
     Require(segmentation && association && !masking,"diagnostic requires online segmentation and instance association enabled, semantic feature masking disabled");
     c.debug=Flag(fs,"Epipolar.Debug",false); c.visualize=Flag(fs,"Epipolar.Visualize",false);
+    c.lkAssistedMatching=Flag(fs,"Epipolar.LKAssistedMatching",false);
     c.drawMatches=Flag(fs,"Epipolar.DrawMatches",true);
+    c.lkWindow=Integer(fs,"Epipolar.LKWindow",c.lkWindow);
+    c.lkMaxLevel=Integer(fs,"Epipolar.LKMaxLevel",c.lkMaxLevel);
+    c.lkSearchRadius=Integer(fs,"Epipolar.LKSearchRadiusPx",c.lkSearchRadius);
+    c.lkMaxDescriptorDistance=Integer(fs,"Epipolar.LKMaxDescriptorDistance",c.lkMaxDescriptorDistance);
+    Number(fs,"Epipolar.LKMaxForwardBackwardPx",c.lkMaxForwardBackward);
+    Number(fs,"Epipolar.LKDescriptorRatio",c.lkDescriptorRatio);
     c.every=Integer(fs,"Epipolar.SaveEvery",c.every);
     c.minBackground=Integer(fs,"Epipolar.MinBackground",c.minBackground);
     c.minInliers=Integer(fs,"Epipolar.MinInliers",c.minInliers);
@@ -69,6 +77,10 @@ EpipolarConfig EpipolarConfig::Read(cv::FileStorage& fs,bool segmentation,bool a
     Require(c.ratio>0 && c.ratio<1 && c.ransacPx>0 && c.confidence>0 && c.confidence<1,"invalid matching/RANSAC parameters");
     Require(c.minInlierRatio>0 && c.minInlierRatio<=1 && c.minCoverage>0 && c.minCoverage<=1,"invalid support/coverage thresholds");
     Require(c.lowPx>=0 && c.lowPx<c.highPx && c.maxDt>0 && c.minDisplacementPx>=0 && c.homographyRatio>0 && c.homographyRatio<=1,"invalid classification/time/degeneracy thresholds");
+    Require(c.lkWindow>=3 && c.lkWindow%2==1 && c.lkMaxLevel>=0 && c.lkMaxLevel<=8 &&
+            c.lkSearchRadius>0 && c.lkSearchRadius<=40 && c.lkMaxDescriptorDistance>0 &&
+            c.lkMaxDescriptorDistance<=256 && c.lkMaxForwardBackward>=0 &&
+            c.lkDescriptorRatio>0 && c.lkDescriptorRatio<1,"invalid LK-assisted matching parameters");
     return c;
 }
 const char* EpipolarStateName(EpipolarState s) {
@@ -81,8 +93,8 @@ EpipolarMotionDetector::EpipolarMotionDetector(const EpipolarConfig& c):config_(
     if(c.debug) {
         frames_.open(c.output+"/frames.csv"); features_.open(c.output+"/features.csv");
         Require(frames_.good() && features_.good(),"cannot open diagnostic CSV");
-        features_ << "frame_id,timestamp,previous_frame_id,current_feature_index,previous_feature_index,current_instance_id,previous_instance_id,epipolar_residual_px,state,reason,background_ransac_inlier,previous_raw_u,previous_raw_v,current_raw_u,current_raw_v,previous_undistorted_u,previous_undistorted_v,current_undistorted_u,current_undistorted_v\n";
-        frames_ << "frame_id,timestamp,previous_frame_id,dt,total_features,matches,background,inliers,inlier_ratio,coverage,median_raw_displacement_px,homography_support,model_valid,reason,unknown,consistent,suspected,match_ms,estimate_ms,residual_ms\n";
+        features_ << "frame_id,timestamp,previous_frame_id,current_feature_index,previous_feature_index,current_instance_id,previous_instance_id,match_source,epipolar_residual_px,state,reason,background_ransac_inlier,previous_raw_u,previous_raw_v,current_raw_u,current_raw_v,previous_undistorted_u,previous_undistorted_v,current_undistorted_u,current_undistorted_v\n";
+        frames_ << "frame_id,timestamp,previous_frame_id,dt,total_features,matches,lk_assisted_matches,background,inliers,inlier_ratio,coverage,median_raw_displacement_px,homography_support,model_valid,reason,unknown,consistent,suspected,match_ms,estimate_ms,residual_ms\n";
         frames_ << std::setprecision(17); features_ << std::setprecision(17);
     }
 }
@@ -98,7 +110,12 @@ double EpipolarMotionDetector::Residual(const cv::Mat& F,cv::Point2d p,cv::Point
     if(!std::isfinite(den) || den<1e-20) return invalid;
     double r=std::abs(b.dot(fa))/std::sqrt(den); return std::isfinite(r)?r:invalid;
 }
-DiagnosticPair DiagnosticMatcher::Process(const EpipolarInput& c,double ratio,double maxDt) {
+DiagnosticMatcher::DiagnosticMatcher():config_(),previous_(),previousGray_(),havePrevious_(false) {}
+DiagnosticPair DiagnosticMatcher::Process(const EpipolarInput& current,double ratio,double maxDt) {
+    static const cv::Mat noImage;
+    return Process(current,ratio,maxDt,noImage);
+}
+DiagnosticPair DiagnosticMatcher::Process(const EpipolarInput& c,double ratio,double maxDt,const cv::Mat& gray) {
     Require(c.instances.size()==c.rawKeys.size() && c.undistortedKeys.size()==c.rawKeys.size(),"invalid diagnostic arrays");
     Require(c.descriptors.empty() || c.descriptors.rows==int(c.rawKeys.size()),"invalid diagnostic descriptors");
     DiagnosticPair pair; pair.previous=previous_;
@@ -112,6 +129,8 @@ DiagnosticPair DiagnosticMatcher::Process(const EpipolarInput& c,double ratio,do
         if(!std::isfinite(r.dt) || r.dt<=0 || r.dt>maxDt || c.frameId<=p.frameId) return fail("TIME_GAP");
         if(c.descriptors.empty() || p.descriptors.empty() || c.descriptors.rows<2 || p.descriptors.rows<2) return fail("NO_MATCH");
         if(c.descriptors.type()!=CV_8UC1 || p.descriptors.type()!=CV_8UC1 || c.descriptors.cols!=32 || p.descriptors.cols!=32) return fail("INVALID_DESCRIPTOR");
+        if(p.descriptors.rows!=int(p.rawKeys.size()) || c.descriptors.rows!=int(c.rawKeys.size()) ||
+           p.instances.size()!=p.rawKeys.size() || c.instances.size()!=c.rawKeys.size()) return fail("INVALID_FEATURE_ARRAYS");
     auto start=Clock::now();
     cv::BFMatcher matcher(cv::NORM_HAMMING); std::vector<std::vector<cv::DMatch>> forward,backward;
     matcher.knnMatch(p.descriptors,c.descriptors,forward,2); matcher.knnMatch(c.descriptors,p.descriptors,backward,2);
@@ -123,11 +142,101 @@ DiagnosticPair DiagnosticMatcher::Process(const EpipolarInput& c,double ratio,do
         matches.emplace_back(i,j); auto& f=r.features[j]; f.previousIndex=i; f.previousInstance=p.instances[i]; f.reason="MODEL_UNRELIABLE";
     }
     r.matchMs=Ms(start); r.matches=matches.size();
-    if(matches.empty()) return fail("NO_MATCH");
-        r.reason="OK"; return r;
+    r.reason=matches.empty()?"NO_MATCH":"OK";
+    for(const auto& match:matches) {
+        auto& feature=r.features[match.second];
+        feature.previousIndex=match.first;
+        feature.previousInstance=p.instances[match.first];
+        feature.reason="MODEL_UNRELIABLE";
+        feature.matchSource="ORB";
+    }
+
+    if(config_.lkAssistedMatching && !previousGray_.empty() && !gray.empty() &&
+       previousGray_.type()==CV_8UC1 && gray.type()==CV_8UC1 &&
+       previousGray_.size()==p.size && gray.size()==c.size && previousGray_.size()==gray.size()) {
+        std::vector<int> sourceIndices;
+        std::vector<cv::Point2f> sourcePoints;
+        for(size_t i=0;i<p.rawKeys.size();++i) if(p.instances[i]>0) {
+            const auto point=p.rawKeys[i].pt;
+            if(std::isfinite(point.x)&&std::isfinite(point.y)&&point.x>=0&&point.y>=0&&point.x<gray.cols&&point.y<gray.rows) {
+                sourceIndices.push_back(static_cast<int>(i));
+                sourcePoints.push_back(point);
+            }
+        }
+        if(!sourcePoints.empty()) {
+            std::vector<cv::Point2f> forward,backward;
+            std::vector<uchar> forwardStatus,backwardStatus;
+            std::vector<float> errors;
+            cv::TermCriteria term(cv::TermCriteria::COUNT|cv::TermCriteria::EPS,30,0.01);
+            cv::calcOpticalFlowPyrLK(previousGray_,gray,sourcePoints,forward,forwardStatus,errors,
+                                     cv::Size(config_.lkWindow,config_.lkWindow),config_.lkMaxLevel,term);
+            std::vector<cv::Point2f> backStarts;
+            std::vector<size_t> backMap;
+            for(size_t i=0;i<forward.size();++i) if(forwardStatus[i] && std::isfinite(forward[i].x) &&
+               std::isfinite(forward[i].y) && forward[i].x>=0 && forward[i].y>=0 &&
+               forward[i].x<gray.cols && forward[i].y<gray.rows) {
+                backStarts.push_back(forward[i]);backMap.push_back(i);
+            }
+            if(!backStarts.empty())
+                cv::calcOpticalFlowPyrLK(gray,previousGray_,backStarts,backward,backwardStatus,errors,
+                                         cv::Size(config_.lkWindow,config_.lkWindow),config_.lkMaxLevel,term);
+            std::vector<int> backIndex(forward.size(),-1);
+            for(size_t i=0;i<backMap.size();++i) backIndex[backMap[i]]=static_cast<int>(i);
+            std::vector<bool> previousUsed(p.rawKeys.size(),false),currentUsed(c.rawKeys.size(),false);
+            for(size_t j=0;j<r.features.size();++j) if(r.features[j].previousIndex>=0) {
+                previousUsed[r.features[j].previousIndex]=true;currentUsed[j]=true;
+            }
+            struct Proposal {int previous,current,distance;float spatial;};
+            std::vector<Proposal> proposals;
+            const int radius2=config_.lkSearchRadius*config_.lkSearchRadius;
+            for(size_t k=0;k<sourceIndices.size();++k) {
+                const int back=backIndex[k];
+                if(back<0 || !backwardStatus[back] || !std::isfinite(backward[back].x) || !std::isfinite(backward[back].y) ||
+                   cv::norm(backward[back]-sourcePoints[k])>config_.lkMaxForwardBackward) continue;
+                const int pi=sourceIndices[k];
+                std::vector<std::pair<int,int>> local;
+                for(size_t j=0;j<c.rawKeys.size();++j) if(c.instances[j]>0 && !currentUsed[j]) {
+                    const cv::Point2f delta=c.rawKeys[j].pt-forward[k];
+                    const float spatial=delta.dot(delta);
+                    if(spatial>radius2) continue;
+                    const int distance=cv::norm(p.descriptors.row(pi),c.descriptors.row(static_cast<int>(j)),cv::NORM_HAMMING);
+                    local.emplace_back(distance,static_cast<int>(j));
+                }
+                if(local.empty()) continue;
+                std::sort(local.begin(),local.end());
+                const int best=local.front().first;
+                if(best>config_.lkMaxDescriptorDistance) continue;
+                if(local.size()>1 && best>=config_.lkDescriptorRatio*local[1].first) continue;
+                if(local.size()==1 && best>config_.lkMaxDescriptorDistance*0.6) continue;
+                const int ci=local.front().second;
+                const cv::Point2f delta=c.rawKeys[ci].pt-forward[k];
+                proposals.push_back({pi,ci,best,delta.dot(delta)});
+            }
+            std::sort(proposals.begin(),proposals.end(),[](const Proposal& a,const Proposal& b) {
+                return a.distance==b.distance?a.spatial<b.spatial:a.distance<b.distance;
+            });
+            for(const auto& proposal:proposals) {
+                if(previousUsed[proposal.previous]||currentUsed[proposal.current]) continue;
+                auto& feature=r.features[proposal.current];
+                feature.previousIndex=proposal.previous;
+                feature.previousInstance=p.instances[proposal.previous];
+                feature.reason="LK_ASSISTED_MATCH";
+                feature.matchSource="LK_ORB";
+                previousUsed[proposal.previous]=true;currentUsed[proposal.current]=true;
+                ++r.assistedMatches;
+            }
+            r.matches=static_cast<int>(std::count_if(r.features.begin(),r.features.end(),
+                [](const EpipolarFeature& feature){return feature.previousIndex>=0;}));
+            r.reason=r.matches>0?"OK":"NO_MATCH";
+        }
+    }
+    if(r.matches==0) return fail("NO_MATCH");
+    return r;
     };
     pair.matching=match();
     previous_=c; previous_.descriptors=c.descriptors.clone(); previous_.K=c.K.clone(); previous_.distortion=c.distortion.clone();
+    if(!gray.empty() && gray.type()==CV_8UC1 && gray.size()==c.size) previousGray_=gray.clone();
+    else previousGray_.release();
     havePrevious_=true; return pair;
 }
 EpipolarResult EpipolarMotionDetector::Evaluate(const EpipolarInput& c,const DiagnosticPair* pair) {
@@ -219,10 +328,10 @@ void EpipolarMotionDetector::Record(const EpipolarInput& c,const cv::Mat& image,
     int counts[3]={}; for(const auto& f:r.features) ++counts[int(f.state)];
     std::cout << "[Epipolar] frame=" << c.frameId << " model=" << r.modelValid << " reason=" << r.reason << " matches=" << r.matches << " background=" << r.background << " inliers=" << r.inliers << " UNKNOWN/CONSISTENT/SUSPECTED=" << counts[0] << '/' << counts[1] << '/' << counts[2] << " (geometry diagnostic; features not removed)" << std::endl;
     if(config_.debug) {
-        frames_ << c.frameId << ',' << c.timestamp << ',' << r.previousFrameId << ',' << r.dt << ',' << r.features.size() << ',' << r.matches << ',' << r.background << ',' << r.inliers << ',' << r.inlierRatio << ',' << r.coverage << ',' << r.medianDisplacement << ',' << r.homographySupport << ',' << r.modelValid << ',' << r.reason << ',' << counts[0] << ',' << counts[1] << ',' << counts[2] << ',' << r.matchMs << ',' << r.estimateMs << ',' << r.residualMs << '\n';
+        frames_ << c.frameId << ',' << c.timestamp << ',' << r.previousFrameId << ',' << r.dt << ',' << r.features.size() << ',' << r.matches << ',' << r.assistedMatches << ',' << r.background << ',' << r.inliers << ',' << r.inlierRatio << ',' << r.coverage << ',' << r.medianDisplacement << ',' << r.homographySupport << ',' << r.modelValid << ',' << r.reason << ',' << counts[0] << ',' << counts[1] << ',' << counts[2] << ',' << r.matchMs << ',' << r.estimateMs << ',' << r.residualMs << '\n';
         for(size_t j=0;j<r.features.size();++j) {
             const auto& f=r.features[j];
-            features_ << c.frameId << ',' << c.timestamp << ',' << r.previousFrameId << ',' << j << ',' << f.previousIndex << ',' << c.instances[j] << ',' << f.previousInstance << ',' << f.residual << ',' << EpipolarStateName(f.state) << ',' << f.reason << ',' << f.backgroundInlier;
+            features_ << c.frameId << ',' << c.timestamp << ',' << r.previousFrameId << ',' << j << ',' << f.previousIndex << ',' << c.instances[j] << ',' << f.previousInstance << ',' << f.matchSource << ',' << f.residual << ',' << EpipolarStateName(f.state) << ',' << f.reason << ',' << f.backgroundInlier;
             if(f.previousIndex>=0) {
                 const auto& raw=previous_.rawKeys[f.previousIndex].pt;
                 const auto& un=previous_.undistortedKeys[f.previousIndex].pt;

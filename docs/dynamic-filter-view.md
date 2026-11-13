@@ -8,7 +8,7 @@ RGB 原图和 `Frame::mvKeys` 同时保存；不使用去畸变坐标 `mvKeysUn`
 
 1. RGB-D 预处理、分割和原始索引关联；对极/LK 两帧证据。
 2. 原 Tracking 初步跟踪、TrackLocalMap 和 PoseOptimization。优化器在实际添加边时记录原始特征索引；另记录该帧是否完成优化以及最后的优化内点索引。
-3. 地图提交前的原有动态过滤钩子：冻结初步建边索引作为资格快照，按原规则生成候选、检查安全条件，apply 至多额外优化一次；回退时连同原有算法状态恢复优化测量元数据。
+3. 地图提交前的原有动态过滤钩子：冻结初步建边索引作为资格快照，按原规则生成候选、检查安全条件，启用后至多额外优化一次；回退时连同原有算法状态恢复优化测量元数据。
 4. 生成只读显示结果：before = 冻结资格索引；after = before 减去接受的排除掩码。程序断言 after 与真实最终构边索引完全相同。内点数来自优化器最后的外点分类，单独计数，不使用 Tracking 的地图支持数冒充优化内点数。
 5. 原流程继续运动模型、关键帧与新地图点提交、上一帧/轨迹缓存。GrabImageRGBD 将之前冻结的统计与本次 RGB 图像整体发布。Viewer 可显示上一份完整快照，但不会拼接不同帧的图像、点或数量。
 
@@ -20,14 +20,10 @@ RGB 原图和 `Frame::mvKeys` 同时保存；不使用去畸变坐标 `mvKeysUn`
 
 ## 配置与运行
 
-原始默认 YAML 未添加实验配置。按已有集成说明启用分割、实例关联、对极、Tracking 三维与 LK；关闭 selected/person 特征屏蔽；原有深度差门限使用 1 启用，几何模块的 Use 开关使用 0 启用。三种模式：
+模块开关集中放在 [TUM3-instance-association.yaml](../config/TUM3-instance-association.yaml) 中：语义分割/实例关联及各诊断按各自开关运行；动态过滤仅由总开关控制，`0` 开启真实过滤，`1` 或缺失关闭。旧 `Dynamic.FilterMode` 已废弃，残留会警告且不会生效。运行时无需再传模块开关，但命令行仍需提供词典、YAML、数据集和关联文件路径。
 
 ```yaml
-# 关闭：1（缺失也关闭）
-Dynamic.UseDynamicFilter: 1
-Dynamic.FilterMode: "simulate"
-# 模拟：UseDynamicFilter 改为 0，mode 仍为 simulate
-# 真实：UseDynamicFilter 为 0，mode 改为 apply
+Dynamic.UseDynamicFilter: 0
 
 Run.Viewer: 1
 # 独立输出目录；每次实验指定不同目录，避免覆盖
@@ -51,12 +47,14 @@ python3 tools/validate_dynamic_filter_view.py --case all --frames 120 --output o
 
 ## 输出
 
-- `frames.csv`：frame_id、timestamp、filter_enabled、filter_mode、orb_total、candidates、observations_before、observations_after、actual_excluded、final_inliers、accepted、executed、status、reason、optimization_available。
+- `frames.csv`：frame_id、timestamp、enabled、orb_total、candidates、observations_before、observations_after、actual_excluded、final_inliers、applied、executed、status、reason、optimization_available。
 - `observations.csv`：每帧每个原始 index 的原图坐标、候选、实际优化排除、before/after 资格、真实 final_edge、最终 final_inlier。无测量的字段输出 N/A。
 - `frame_<id>_<timestamp>.png`：与现有窗口使用同一绘制函数的 RGB 帧，包含中文状态及图例。
 
-状态区分别显示“仅模拟，实际排除=0”“过滤已接受，实际排除=n”“未应用，实际排除=0”或“已回退，实际排除=0”。关闭独立显示“过滤关闭”。原因保留机器可检索的原始代码。
+状态区分别显示“过滤已接受，实际排除=n”“未应用，实际排除=0”或“已回退，实际排除=0”。关闭独立显示“过滤关闭”。原因保留机器可检索的原始代码。
 
 新增界面数量的核对以 `Dynamic.FilterViewOutputDirectory` 中的 CSV 为准。原 `Dynamic.FilterOutputDirectory` 保留旧审计格式，其内点字段属于原地图支持计数，不替代新视图中直接取自优化器的最终内点测量。使用 `--capture-window` 可连接 X11 捕获本程序的 Current Frame 窗口，脚本要求对应分支确实出现，并逐像素核对窗口内容与同帧 FrameDrawer 输出。
 
 本机实测、窗口截图和验证限制见 [验证报告](validation/dynamic-filter-view-results.md)。
+
+当前版本没有模式选择或 simulate 路径。验证驱动只设置总开关；on/rollback/safety 是测试场景名称，不是运行模式。新结果见 [单开关验证](validation/dynamic-filter-switch-results.md)。

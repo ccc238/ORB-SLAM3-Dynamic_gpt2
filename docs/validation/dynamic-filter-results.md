@@ -1,5 +1,7 @@
 # 保守动态候选过滤：实测与交付
 
+> 历史版本实测记录：当前已取消 simulate/apply 模式，改为 Dynamic.UseDynamicFilter=0 直接真实过滤；新接口和结果见 [单开关验证](dynamic-filter-switch-results.md)。下文保留原始测试语义，不作为当前运行配置。
+
 2026-11-12。结果根目录：[outputs/dynamic-filter-validation](../../outputs/dynamic-filter-validation/)。本次停在逐特征的基础动态 SLAM 集成；未增加 HMM、实例整体判定、稠密过滤或历史地图点清理。
 
 **结论：真实过滤构边、关键帧/建点保护及支持不足回退已验证；没有证据证明动态识别准确率或稳定的轨迹精度改善。**

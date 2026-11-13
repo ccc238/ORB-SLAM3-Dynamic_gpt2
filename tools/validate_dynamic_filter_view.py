@@ -25,6 +25,7 @@ def rows(path):
 
 def audit(folder):
     frames = rows(folder/'view/frames.csv')
+    assert frames and 'filter_mode' not in frames[0] and 'enabled' in frames[0] and 'applied' in frames[0]
     original = {r['frame_id']: r for r in rows(folder/'filter/frames.csv')} if (folder/'filter/frames.csv').exists() else {}
     groups = defaultdict(list)
     with (folder/'view/observations.csv').open() as f:
@@ -59,13 +60,14 @@ def audit(folder):
         else:
             assert sum(r['final_inlier']=='1' for r in group)==int(fr['final_inliers'])
             assert all(r['final_edge']=='1' for r in group if r['final_inlier']=='1')
-        if fr['accepted']!='1':
+        if fr['applied']!='1':
             assert not excluded and fr['observations_before']==fr['observations_after']
-        if fr['filter_enabled']=='0' or fr['filter_mode']=='simulate':
+        if fr['enabled']=='0':
             assert not excluded
         if fr['frame_id'] in original:
             old = original[fr['frame_id']]
-            assert old['accepted']==fr['accepted'] and old['reason']==fr['reason']
+            assert old['applied']==fr['applied'] and old['reason']==fr['reason']
+            assert old['enabled']==fr['enabled'] and old['actual_excluded']==fr['actual_excluded']
             assert old['candidates']==fr['candidates']
             if fr['observations_before']!='N/A':
                 assert old['pre_edges']==fr['observations_before'] and old['final_edges']==fr['observations_after']
@@ -82,7 +84,7 @@ def audit(folder):
             for row in group:
                 if row['effective_excluded']=='1':
                     assert image.getpixel((round(float(row['x'])),round(float(row['y']))))==(255,0,0)
-            if fr['accepted']=='1' or 'ROLLBACK' in fr['reason'] or (fr['candidates']!='0' and fr['filter_mode']=='simulate'):
+            if fr['applied']=='1' or 'ROLLBACK' in fr['reason']:
                 screenshots.append(str(pngs[0].relative_to(ROOT)))
     live_screenshots=[]
     captures=folder/'view/window-capture.json'
@@ -97,10 +99,11 @@ def audit(folder):
             live_screenshots.append(str((folder/'view'/shot['window_png']).relative_to(ROOT)))
     run=rows(folder/'RunFrames.csv')
     assert len(run)==len(frames)
+    assert all(a['enabled']==b['enabled'] for a,b in zip(run,frames))
     assert all(abs(float(a['timestamp'])-float(b['timestamp']))<1e-7 for a,b in zip(run,frames))
     return {'frames':len(frames),'candidates':sum(int(r['candidates']) for r in frames),
             'actual_excluded':sum(int(r['actual_excluded']) for r in frames),
-            'accepted_frames':sum(r['accepted']=='1' for r in frames),
+            'applied_frames':sum(r['applied']=='1' for r in frames),
             'reasons':dict(Counter(r['reason'] for r in frames)),
             'na_inlier_frames':sum(r['final_inliers']=='N/A' for r in frames),
             'tracking_failures':sum(r['state']!='2' for r in run),
@@ -144,9 +147,8 @@ def run_with_window_capture(cmd, env, log, folder):
                 fid=png.name.split('_')[1];fr=metadata.get(fid)
                 if not fr:continue
                 category=('initialization' if fr['final_inliers']=='N/A' else
-                    'off' if fr['filter_enabled']=='0' else
-                    'simulate_candidates' if fr['filter_mode']=='simulate' and fr['candidates']!='0' else
-                    'apply_accepted' if fr['accepted']=='1' else
+                    'off' if fr['enabled']=='0' else
+                    'filter_applied' if fr['applied']=='1' else
                     'rollback' if 'ROLLBACK' in fr['reason'] else
                     'safety' if fr['reason']=='INSUFFICIENT_REMAINING_INLIERS' else 'other')
                 if category in captured or category=='other':continue
@@ -168,41 +170,43 @@ def run_with_window_capture(cmd, env, log, folder):
         if process.poll() is None:process.terminate()
     if process.wait()!=0:raise RuntimeError("RGB-D viewer run failed")
     assert captured, "No live Current Frame screenshot matched the FrameDrawer snapshot"
-    expected={'off':'off','simulate':'simulate_candidates','apply':'apply_accepted','rollback':'rollback','safety':'safety'}.get(folder.name)
+    expected={'off':'off','on':'filter_applied','legacy':'filter_applied','rollback':'rollback','safety':'safety'}.get(folder.name)
     if expected:assert expected in captured, f"Requested live branch {expected} was not captured"
     return captured
 
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('--output',type=Path,default=ROOT/'outputs/dynamic-filter-view-validation')
-    p.add_argument('--case',choices=['off','simulate','apply','rollback','safety','all','analyze'],default='all')
+    p.add_argument('--output',type=Path,default=ROOT/'outputs/dynamic-filter-switch-validation/runs')
+    p.add_argument('--case',choices=['off','on','legacy','missing','rollback','safety','all','analyze'],default='all')
     p.add_argument('--frames',type=int,default=120)
     p.add_argument('--viewer',action='store_true')
     p.add_argument('--capture-window',action='store_true',help='X11 Current Frame screenshot matched pixel-for-pixel to saved renderer output')
     args=p.parse_args();args.viewer=args.viewer or args.capture_window;args.output.mkdir(parents=True,exist_ok=True)
     summary_path=args.output/'summary.json'
     summary=json.loads(summary_path.read_text()) if summary_path.exists() else {}
-    cases=['off','simulate','apply','rollback','safety'] if args.case=='all' else [args.case]
+    cases=['off','on','rollback','safety','legacy'] if args.case=='all' else [args.case]
     if args.case=='analyze':
-        cases=[name for name in ['off','simulate','apply','rollback','safety'] if (args.output/name/'view/frames.csv').exists()]
+        cases=[name for name in ['off','on','rollback','safety','legacy','missing'] if (args.output/name/'view/frames.csv').exists()]
     for name in cases:
         folder=(args.output/name).resolve()
         if args.case!='analyze':
             if folder.exists():raise FileExistsError(folder)
             folder.mkdir()
-            mode='simulate' if name in ['off','simulate'] else 'apply'
             settings={'Run.Viewer':int(args.viewer),'SemanticMask.Visualize':0,'SemanticMask.AssociationDebug':0,
                       'SemanticMask.OutputDirectory':str(folder/'semantic'),
                       'Epipolar.Debug':0,'Epipolar.Visualize':0,'Epipolar.OutputDirectory':str(folder/'epipolar'),
                       'Residual3D.Debug':0,'Residual3D.Visualize':0,'Residual3D.OutputDirectory':str(folder/'depth'),
                       'LKCheck.Visualize':0,'LKCheck.OutputDirectory':str(folder/'lk'),
-                      'Dynamic.UseDynamicFilter':int(name=='off'),'Dynamic.FilterMode':mode,
+                      'Dynamic.UseDynamicFilter':int(name=='off'),
                       'Dynamic.FilterOutputDirectory':str(folder/'filter'),
                       'Dynamic.FilterViewOutputDirectory':str(folder/'view'),'Dynamic.FilterViewSaveEvery':10}
+            if name=='legacy':settings['Dynamic.FilterMode']='simulate' # ignored legacy key; must still really filter
             if name=='rollback':settings['Dynamic.FilterMinFinalInliers']=2000
             if name=='safety':settings['Dynamic.FilterMinRemaining']=2000
             text=(ROOT/'config/TUM3-instance-association.yaml').read_text()
+            if name=='missing':
+                settings.pop('Dynamic.UseDynamicFilter');text=re.sub(r'(?m)^Dynamic\.UseDynamicFilter:.*$','',text)
             for key,value in settings.items():
                 text=re.sub(r'(?m)^'+re.escape(key)+r':.*$','',text)
                 text+='\n'+key+': '+json.dumps(value)+'\n'
@@ -216,7 +220,15 @@ def main():
                 with (folder/'run.log').open('w') as log:
                     if args.capture_window:run_with_window_capture(cmd,env,log,folder)
                     else:subprocess.run(cmd,cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=900,check=True)
-        summary[name]=audit(folder);summary_path.write_text(json.dumps(summary,indent=2))
+        summary[name]=audit(folder)
+        if name in ('off','missing'):
+            assert not (folder/'filter/frames.csv').exists()
+            assert all(r['enabled']=='0' and r['applied']=='0' for r in rows(folder/'view/frames.csv'))
+        if name in ('on','legacy'):assert summary[name]['applied_frames']>0, 'No actual filtering exercised'
+        if name=='rollback':assert summary[name]['reasons'].get('FINAL_SUPPORT_FAILED_ROLLBACK',0)>0
+        if name=='safety':assert summary[name]['reasons'].get('INSUFFICIENT_REMAINING_INLIERS',0)>0
+        if name=='legacy':assert 'deprecated' in (folder/'run.log').read_text() and 'ignored' in (folder/'run.log').read_text()
+        summary_path.write_text(json.dumps(summary,indent=2))
         print('PASS',name,json.dumps(summary[name]),flush=True)
 
 

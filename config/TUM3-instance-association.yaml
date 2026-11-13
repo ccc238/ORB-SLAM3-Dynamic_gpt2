@@ -54,6 +54,10 @@ ORBextractor.nLevels: 8
 ORBextractor.iniThFAST: 20
 ORBextractor.minThFAST: 7
 
+# 在人体区域内补充提取特征，不改变原有全图 ORB 配额；仅用于 RGB-D 语义开启时。
+SemanticMask.PersonFeatureBoost: 200
+SemanticMask.PersonFeatureErode: 8
+
 #--------------------------------------------------------------------------------------------
 # Viewer Parameters
 #--------------------------------------------------------------------------------------------
@@ -70,10 +74,15 @@ Viewer.ViewpointF: 500.0
 
 
 # TUM imread uses BGR. Semantic masks are computed after all SLAM resizing.
+# Viewer 显示开关：1=显示 SLAM 窗口，0=不显示。
 Run.Viewer: 1
+# 语义分割总开关：1=启用在线分割和实例关联，0=关闭。
 # Master switch defaults to 0 if absent. MaskOnly defaults to 1.
 Dynamic.Enable: 1
+# 兼容旧配置的特征屏蔽参数；当前实例关联流程不会据此屏蔽特征。
 Dynamic.MaskOnly: 1
+# 动态过滤总开关：0=开启真实过滤，1=关闭；缺失时默认关闭。仅接受整数 0/1。
+Dynamic.UseDynamicFilter: 0
 # MaskOnly is retained for compatibility; UseEpipolar controls diagnostics independently.
 # Model defaults to $HOME/models/yolo/yolo11s-seg.onnx
 SemanticMask.Mode: "selected"
@@ -83,20 +92,33 @@ SemanticMask.NmsIoU: 0.7
 SemanticMask.MaxDetections: 300
 # Radius in CURRENT SLAM image pixels; 0 disables dilation.
 SemanticMask.DilationRadius: 0
+# 分割结果可视化开关：1=显示，0=关闭（需同时启用查看器）。
 SemanticMask.Visualize: 1
+# 分割调试日志开关：1=输出，0=关闭。
 SemanticMask.Debug: 0
 SemanticMask.OutputDirectory: "outputs/instance-association/debug"
 
 # Dynamic.Enable=1 enables association and always disables feature masking.
 # Writes per-frame overlay, uint16 labels and CSV only when explicitly enabled.
+# 实例关联调试文件开关：1=保存关联图像/标签/CSV，0=关闭。
 SemanticMask.AssociationDebug: 0
 
 # 对极几何诊断：0=启用，1=关闭；缺失默认 1。仅读取启动配置，不剔除特征。
 Dynamic.UseEpipolar: 0
-# Independent CSV / overlay switches and saving frequency (diagnostics still run every frame).
+# 对极诊断 CSV 开关：1=保存调试 CSV，0=关闭额外 CSV。
 Epipolar.Debug: 0
+# 对极匹配可视化开关：1=显示/保存可视化，0=关闭。
 Epipolar.Visualize: 0
+# LK 预测辅助 ORB 匹配开关：1=启用，0=仅使用原有 ORB 匹配。
+Epipolar.LKAssistedMatching: 1
+Epipolar.LKWindow: 21
+Epipolar.LKMaxLevel: 3
+Epipolar.LKSearchRadiusPx: 8
+Epipolar.LKMaxDescriptorDistance: 72
+Epipolar.LKMaxForwardBackwardPx: 1.5
+Epipolar.LKDescriptorRatio: 0.9
 Epipolar.SaveEvery: 1
+# 对极匹配连线绘制开关：1=绘制，0=不绘制。
 Epipolar.DrawMatches: 1
 Epipolar.OutputDirectory: "outputs/epipolar"
 
@@ -106,11 +128,13 @@ Dynamic.Use3DResidual: 0
 # camera motion source: tracking (default) or background_pnp (comparison)
 Dynamic.DepthPoseSource: "tracking"
 Residual3D.TrackingMinInliers: 25
+# 三维残差调试日志开关：1=输出，0=关闭。
 Residual3D.Debug: 1
+# 三维残差可视化开关：1=保存可视化，0=关闭。
 Residual3D.Visualize: 0
 Residual3D.OutputDirectory: "outputs/depth-tracking-refreshed"
 
-# Paper raw two-frame axial-depth gate; classification thresholds remain unchanged.
+# 两帧原始深度差门控：1=启用深度差筛选，0=关闭；不改变分类残差阈值。
 Residual3D.UseDepthDifferenceGate: 1
 Residual3D.MaxDepthDifferenceM: 0.20
 
@@ -118,7 +142,7 @@ Residual3D.MaxDepthDifferenceM: 0.20
 # 仅输出独立证据，不改变匹配、原几何分类或特征关联。
 Dynamic.UseLKCheck: 0
 LKCheck.OutputDirectory: "outputs/lk-check-tum3-default"
-# Visualize 为普通标志：1=保存图片，0=不保存图片。
+# LK 交叉验证图片开关：1=保存图片，0=不保存图片。
 LKCheck.Visualize: 1
 LKCheck.SaveEvery: 10
 LKCheck.MaxImagesPerFrame: 4

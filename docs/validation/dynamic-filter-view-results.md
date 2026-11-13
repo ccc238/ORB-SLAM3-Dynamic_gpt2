@@ -1,5 +1,7 @@
 # 动态过滤显示与统计验证
 
+> 历史版本实测记录：当前已取消 simulate/apply 模式，改为 Dynamic.UseDynamicFilter=0 直接真实过滤；新接口和结果见 [单开关验证](dynamic-filter-switch-results.md)。下文保留原始测试语义，不作为当前运行配置。
+
 2026-11-13。范围仅为显示和观测数量审计，没有改变候选交集、过滤决策或默认安全阈值。复用现有 rgbd_tum、FrameDrawer 和 `ORB-SLAM3: Current Frame` 窗口。
 
 结果目录：[outputs/dynamic-filter-view-validation](../../outputs/dynamic-filter-view-validation/)。配置及统计定义见 [显示说明](../dynamic-filter-view.md)。所有构建均使用 `-j1`。

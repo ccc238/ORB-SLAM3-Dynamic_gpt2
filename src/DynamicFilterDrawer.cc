@@ -49,7 +49,7 @@ void Validate(const DynamicFilterView& v) {
         if(v.afterIndices!=v.finalEdgeIndices)throw std::runtime_error("Filter view: actual final edge mismatch");
         for(size_t i=0;i<v.keys.size();++i) {
             bool excluded=v.excludedObservations[i];
-            if(excluded&&(!v.accepted||!v.enabled||v.mode!="apply"||!v.candidates[i]||!before.count(i)))
+            if(excluded&&(!v.accepted||!v.enabled||!v.candidates[i]||!before.count(i)))
                 throw std::runtime_error("Filter view: invalid effective exclusion");
             if(bool(after.count(i))!=(bool(before.count(i))&&!excluded))
                 throw std::runtime_error("Filter view: inconsistent frozen eligibility snapshot");
@@ -67,7 +67,7 @@ void FrameDrawer::ConfigureDynamicFilterView(const std::string& output,int saveE
     EnsureSemanticDirectory(output);
     mDynamicFrames.open(output+"/frames.csv");mDynamicObservations.open(output+"/observations.csv");
     if(!mDynamicFrames||!mDynamicObservations)throw std::runtime_error("Cannot open dynamic filter view CSV directory: "+output);
-    mDynamicFrames<<"frame_id,timestamp,filter_enabled,filter_mode,orb_total,candidates,observations_before,observations_after,actual_excluded,final_inliers,accepted,executed,status,reason,optimization_available\n";
+    mDynamicFrames<<"frame_id,timestamp,enabled,orb_total,candidates,observations_before,observations_after,actual_excluded,final_inliers,applied,executed,status,reason,optimization_available\n";
     mDynamicObservations<<"frame_id,timestamp,index,x,y,candidate,effective_excluded,eligible_before,eligible_after,final_edge,final_inlier\n";
 }
 
@@ -87,7 +87,7 @@ void FrameDrawer::UpdateDynamicFilterFrame(const cv::Mat& image,bool inputIsRGB,
     else throw std::runtime_error("Filter view: unsupported RGB image channels");
     std::lock_guard<std::mutex> writeLock(mDynamicWriterMutex);
     if(mDynamicFrames) {
-        mDynamicFrames<<view.frameId<<','<<std::fixed<<std::setprecision(9)<<view.timestamp<<','<<view.enabled<<','<<view.mode<<','
+        mDynamicFrames<<view.frameId<<','<<std::fixed<<std::setprecision(9)<<view.timestamp<<','<<view.enabled<<','
             <<view.keys.size()<<','<<view.CandidateCount()<<','<<Number(view.qualificationAvailable,view.beforeIndices.size())<<','
             <<Number(view.qualificationAvailable,view.afterIndices.size())<<','<<view.ExcludedCount()<<','
             <<Number(view.optimizationAvailable,view.finalInlierIndices.size())<<','<<view.accepted<<','<<view.executed<<','<<view.status<<','<<Csv(view.reason)<<','<<view.optimizationAvailable<<'\n';
@@ -122,12 +122,12 @@ cv::Mat FrameDrawer::RenderDynamicFilterFrame(const cv::Mat& bgr,const DynamicFi
     for(size_t i=0;i<v.keys.size();++i)if(v.candidates[i])cv::circle(canvas,v.keys[i].pt,5,{0,255,255},1,cv::LINE_AA);
     for(size_t i=0;i<v.keys.size();++i)if(v.excludedObservations[i])cv::drawMarker(canvas,v.keys[i].pt,{0,0,255},cv::MARKER_TILTED_CROSS,10,2,cv::LINE_AA);
     int y=bgr.rows+23;
-    std::ostringstream top;top<<"Frame="<<v.frameId<<"  t="<<std::fixed<<std::setprecision(6)<<v.timestamp<<"  enabled="<<v.enabled<<"  mode="<<v.mode;
+    std::ostringstream top;top<<"Frame="<<v.frameId<<"  t="<<std::fixed<<std::setprecision(6)<<v.timestamp<<"  enabled="<<v.enabled<<"  applied="<<v.accepted;
     Text(canvas,top.str(),{8,y});y+=25;
     Text(canvas,"ORB 总数="+std::to_string(v.keys.size())+"   疑似动态候选="+std::to_string(v.CandidateCount()),{8,y});y+=25;
     Text(canvas,"优化观测: 前="+Number(v.qualificationAvailable,v.beforeIndices.size())+"  后="+Number(v.qualificationAvailable,v.afterIndices.size())+"  实际排除="+std::to_string(v.ExcludedCount()),{8,y});y+=25;
-    Text(canvas,"最终优化内点="+Number(v.optimizationAvailable,v.finalInlierIndices.size())+"   accepted="+std::to_string(v.accepted),{8,y});y+=25;
-    const std::string status=!v.enabled?"过滤关闭，实际排除=0":v.mode=="simulate"?"仅模拟，实际排除=0":v.accepted?"过滤已接受，实际排除="+std::to_string(v.ExcludedCount()):v.status=="ROLLED_BACK"?"已回退，实际排除=0":"未应用，实际排除=0";
+    Text(canvas,"最终优化内点="+Number(v.optimizationAvailable,v.finalInlierIndices.size())+"   applied="+std::to_string(v.accepted),{8,y});y+=25;
+    const std::string status=!v.enabled?"过滤关闭，实际排除=0":v.accepted?"过滤已接受，实际排除="+std::to_string(v.ExcludedCount()):v.status=="ROLLED_BACK"?"已回退，实际排除=0":"未应用，实际排除=0";
     Text(canvas,status,{8,y});y+=25;
     Text(canvas,v.status+": "+v.reason,{8,y});y+=25;
     cv::circle(canvas,{13,y-5},2,{150,150,150},-1);Text(canvas,"灰点: 非候选（未确认静态）",{25,y});

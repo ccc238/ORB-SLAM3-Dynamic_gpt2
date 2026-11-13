@@ -2,6 +2,7 @@
 #include "FrameDrawer.h"
 #include <opencv2/imgcodecs.hpp>
 #include <cstdlib>
+#include <sstream>
 #include <thread>
 #include <atomic>
 #include "Frame.h"
@@ -44,8 +45,15 @@ void SaveView(const std::string& name,const DynamicFilterView& view) {
 int main(){try{
     Check(!Config("").enabled&&!Config("Dynamic.UseDynamicFilter: 1\n").enabled,"default off");
     Check(Config("Dynamic.UseDynamicFilter: 0\n").enabled,"0 enabled");
-    for(auto s:{"2","-1","0.0","\"0\"","true","[]","{}"}){bool bad=false;try{Config(std::string("Dynamic.UseDynamicFilter: ")+s+"\n");}catch(...){bad=true;}Check(bad,"strict switch");}
-    for(auto s:{"Dynamic.FilterMode: bad","Dynamic.FilterMode: 0","Dynamic.FilterMaxRatio: 1","Dynamic.FilterMinRemaining: 2","Dynamic.FilterMinFinalInliers: 29","Dynamic.FilterMinCells: 13"}){bool bad=false;try{Config(std::string(s)+"\n");}catch(...){bad=true;}Check(bad,"strict limits/mode");}
+    for(auto s:{"2","-1","0.0","1.0","\"0\"","\"\"","true","[]","{}"}){bool bad=false;try{Config(std::string("Dynamic.UseDynamicFilter: ")+s+"\n");}catch(...){bad=true;}Check(bad,"strict switch");}
+    for(auto s:{"Dynamic.FilterMaxRatio: 1","Dynamic.FilterMinRemaining: 2","Dynamic.FilterMinFinalInliers: 29","Dynamic.FilterMinCells: 13"}){bool bad=false;try{Config(std::string(s)+"\n");}catch(...){bad=true;}Check(bad,"strict safety limits");}
+    for(auto value:{"simulate","apply","bad","0","[]","{}"}) {
+        std::ostringstream warning;auto* saved=std::cerr.rdbuf(warning.rdbuf());
+        auto old=Config(std::string("Dynamic.FilterMode: ")+value+"\n");
+        std::cerr.rdbuf(saved);
+        Check(!old.enabled&&warning.str().find("deprecated")!=std::string::npos&&warning.str().find("ignored")!=std::string::npos,"deprecated mode must warn and be ignored");
+        Check(Config(std::string("Dynamic.UseDynamicFilter: 0\nDynamic.FilterMode: ")+value+"\n").enabled,"legacy mode changed switch");
+    }
     const std::string required="Dynamic.Enable: 1\nDynamic.UseEpipolar: 0\nDynamic.Use3DResidual: 0\nDynamic.DepthPoseSource: tracking\nResidual3D.UseDepthDifferenceGate: 1\nDynamic.UseLKCheck: 0\nDynamic.UseDynamicFilter: 0\n";
     auto semanticRead=[](const std::string& settings){
         const std::string path=cv::tempfile(".yaml");
@@ -98,27 +106,22 @@ int main(){try{
     std::vector<std::unique_ptr<MapPoint>> storage;
     for(int i=0;i<96;++i){auto p=in.rawKeys[i].pt;float z=3+.01*(i%7);storage.emplace_back(new MapPoint(Eigen::Vector3f((p.x-320)*z/500,(p.y-240)*z/500,z),&reference,&map));storage.back()->AddObservation(&reference,i);f.mvpMapPoints[i]=storage.back().get();if(i%2)f.mvuRight[i]=p.x-40/z;}
     Optimizer::PoseOptimization(&f);const auto pose=f.GetPose();auto flags=f.mvbOutlier;auto points=f.mvpMapPoints;auto indices=f.mvPoseOptimizationIndices;const auto initialAudit=f.mPoseObservationAudit;
-    SaveView("off",MakeDynamicFilterView(f,indices,initialAudit,false,"simulate",false,false,"FILTER_DISABLED"));
+    SaveView("off",MakeDynamicFilterView(f,indices,initialAudit,false,false,false,"FILTER_DISABLED"));
     const cv::Mat descriptorsBefore=f.mDescriptors.clone();const auto depthBefore=f.mvDepth;
     std::vector<std::vector<size_t>> gridBefore;
     for(int x=0;x<FRAME_GRID_COLS;++x)for(int y=0;y<FRAME_GRID_ROWS;++y)gridBefore.push_back(f.mGrid[x][y]);
-    DynamicFilterConfig c;c.enabled=true;c.output="/tmp/dynamic-filter-test-simulate";int inliers=96;
+    DynamicFilterConfig c;c.enabled=false;c.output="/tmp/dynamic-filter-test-disabled";int inliers=96;
     {DynamicFilter filter(c);filter.Process(f,in,pair,e,d,lk,true,inliers,30);
-        if(c.output=="/tmp/dynamic-filter-test-simulate"||c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
-            const auto& v=filter.LastView();
-            Check(v.qualificationAvailable&&v.optimizationAvailable,"missing pose measurement");
-            const bool applied=c.output=="/tmp/dynamic-filter-test-apply";
-            Check(v.beforeIndices.size()==96&&v.afterIndices.size()==size_t(applied?92:96)&&v.ExcludedCount()==(applied?4:0),"view counts disagree with actual edges");
-            SaveView(c.output.substr(std::string("/tmp/dynamic-filter-test-").size()),v);
-        }
+
     }
-    Check(f.GetPose().matrix()==pose.matrix()&&f.mvbOutlier==flags&&f.mvpMapPoints==points&&f.mvPoseOptimizationIndices==indices&&inliers==96,"simulate altered algorithm state");
-    Check(cv::norm(descriptorsBefore,f.mDescriptors,cv::NORM_INF)==0&&depthBefore==f.mvDepth,"simulate changed descriptors or depth");
-    int cell=0;for(int x=0;x<FRAME_GRID_COLS;++x)for(int y=0;y<FRAME_GRID_ROWS;++y)Check(gridBefore[cell++]==f.mGrid[x][y],"simulate changed grid");
-    for(int i=0;i<96;++i)Check(f.mvKeys[i].pt==in.rawKeys[i].pt&&f.mvKeysUn[i].pt==in.rawKeys[i].pt,"simulate changed keypoints");
-    c.mode="apply";c.output="/tmp/dynamic-filter-test-apply";
+    Check(f.GetPose().matrix()==pose.matrix()&&f.mvbOutlier==flags&&f.mvpMapPoints==points&&f.mvPoseOptimizationIndices==indices&&inliers==96,"disabled altered algorithm state");
+    Check(cv::norm(descriptorsBefore,f.mDescriptors,cv::NORM_INF)==0&&depthBefore==f.mvDepth,"disabled changed descriptors or depth");
+    int cell=0;for(int x=0;x<FRAME_GRID_COLS;++x)for(int y=0;y<FRAME_GRID_ROWS;++y)Check(gridBefore[cell++]==f.mGrid[x][y],"disabled changed grid");
+    for(int i=0;i<96;++i)Check(f.mvKeys[i].pt==in.rawKeys[i].pt&&f.mvKeysUn[i].pt==in.rawKeys[i].pt,"disabled changed keypoints");
+    Check(!f.mPoseObservationAudit.inlierIndices.empty()&&f.mPoseObservationAudit.inlierIndices==initialAudit.inlierIndices,"disabled changed optimizer audit");
+    c.enabled=true;c.output="/tmp/dynamic-filter-test-apply";
     {DynamicFilter filter(c);filter.Process(f,in,pair,e,d,lk,true,inliers,30);
-        if(c.output=="/tmp/dynamic-filter-test-simulate"||c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
+        if(c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
             const auto& v=filter.LastView();
             Check(v.qualificationAvailable&&v.optimizationAvailable,"missing pose measurement");
             const bool applied=c.output=="/tmp/dynamic-filter-test-apply";
@@ -144,7 +147,7 @@ int main(){try{
     f.mvbDynamicExcluded.clear();f.SetPose(pose);f.mvbOutlier=flags;f.mvPoseOptimizationIndices=indices;f.mPoseObservationAudit=initialAudit;inliers=96;
     c.minFinalInliers=100;c.output="/tmp/dynamic-filter-test-rollback";
     {DynamicFilter filter(c);filter.Process(f,in,pair,e,d,lk,true,inliers,30);
-        if(c.output=="/tmp/dynamic-filter-test-simulate"||c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
+        if(c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
             const auto& v=filter.LastView();
             Check(v.qualificationAvailable&&v.optimizationAvailable,"missing pose measurement");
             const bool applied=c.output=="/tmp/dynamic-filter-test-apply";
@@ -153,8 +156,9 @@ int main(){try{
         }
     }
     Check(f.GetPose().matrix()==pose.matrix()&&f.mvbOutlier==flags&&f.mvpMapPoints==points&&f.mvPoseOptimizationIndices==indices&&inliers==96&&!f.DynamicExcluded(0),"rollback incomplete");
+    Check(f.mPoseObservationAudit.inlierIndices==initialAudit.inlierIndices&&f.mPoseObservationAudit.resultAvailable==initialAudit.resultAvailable&&std::count(f.mvbDynamicExcluded.begin(),f.mvbDynamicExcluded.end(),true)==0,"rollback audit or exclusion flags incomplete");
     c.minRemaining=100;c.output="/tmp/dynamic-filter-test-safety";{DynamicFilter filter(c);filter.Process(f,in,pair,e,d,lk,true,inliers,30);
-        if(c.output=="/tmp/dynamic-filter-test-simulate"||c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
+        if(c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
             const auto& v=filter.LastView();
             Check(v.qualificationAvailable&&v.optimizationAvailable,"missing pose measurement");
             const bool applied=c.output=="/tmp/dynamic-filter-test-apply";
@@ -172,7 +176,7 @@ int main(){try{
     Optimizer::PoseOptimization(&f);auto noOptIndices=f.mvPoseOptimizationIndices;
     c.output="/tmp/dynamic-filter-test-no-observation";
     {DynamicFilter filter(c);filter.Process(f,in,pair,e,d,lk,true,inliers,30);
-        if(c.output=="/tmp/dynamic-filter-test-simulate"||c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
+        if(c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
             const auto& v=filter.LastView();
             Check(v.qualificationAvailable&&v.optimizationAvailable,"missing pose measurement");
             const bool applied=c.output=="/tmp/dynamic-filter-test-apply";
@@ -187,7 +191,7 @@ int main(){try{
     Optimizer::PoseOptimization(&f);inliers=96;c.maxRatio=.00001;
     c.output="/tmp/dynamic-filter-test-ratio";
     {DynamicFilter filter(c);filter.Process(f,in,pair,e,d,lk,true,inliers,30);
-        if(c.output=="/tmp/dynamic-filter-test-simulate"||c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
+        if(c.output=="/tmp/dynamic-filter-test-apply"||c.output=="/tmp/dynamic-filter-test-rollback"||c.output=="/tmp/dynamic-filter-test-safety") {
             const auto& v=filter.LastView();
             Check(v.qualificationAvailable&&v.optimizationAvailable,"missing pose measurement");
             const bool applied=c.output=="/tmp/dynamic-filter-test-apply";
@@ -212,7 +216,7 @@ int main(){try{
     Check(!f.DynamicExcluded(0)&&f.mvPoseOptimizationIndices.size()==96&&inliers==96,"coverage gate failed");
     {Frame unoptimized;unoptimized.mnId=99;unoptimized.mTimeStamp=12.;unoptimized.mvKeys=in.rawKeys;
         unoptimized.mvKeysUn=in.rawKeys;unoptimized.mvKeysUn[0].pt+=cv::Point2f(100,100);
-        auto v=MakeDynamicFilterView(unoptimized,{},unoptimized.mPoseObservationAudit,false,"simulate",false,false,"INITIALIZATION");
+        auto v=MakeDynamicFilterView(unoptimized,{},unoptimized.mPoseObservationAudit,false,false,false,"INITIALIZATION");
         Check(v.keys[0].pt==in.rawKeys[0].pt&&v.keys[0].pt!=unoptimized.mvKeysUn[0].pt,"overlay must use raw RGB coordinates");
         Check(!v.optimizationAvailable&&!v.qualificationAvailable,"unoptimized frame must be N/A");SaveView("initialization",v);
     }
@@ -228,5 +232,5 @@ int main(){try{
         }}while(!done);
         producer.join();Check(checked>0,"snapshot reader never ran");
     }
-    std::cout<<"PASS dynamic filter view states, N/A, RGB, scale, real edge counts; dynamic filter rules, simulate invariance, mono/stereo edges, observation guard, rollback and safety\n";
+    std::cout<<"PASS dynamic filter view states, N/A, RGB, scale, real edge counts; dynamic filter rules, disabled invariance, mono/stereo edges, observation guard, rollback and safety\n";
 }catch(const std::exception& ex){std::cerr<<"FAIL "<<ex.what()<<'\n';return 1;}}

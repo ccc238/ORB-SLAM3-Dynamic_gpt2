@@ -80,6 +80,7 @@ Frame::Frame(const Frame &frame)
      mTlr(frame.mTlr), mRlr(frame.mRlr), mtlr(frame.mtlr), mTrl(frame.mTrl),
      mTcw(frame.mTcw), mbHasPose(false), mbHasVelocity(false)
 {
+    mnFeatureBoostAdded=frame.mnFeatureBoostAdded;
     for(int i=0;i<FRAME_GRID_COLS;i++)
         for(int j=0; j<FRAME_GRID_ROWS; j++){
             mGrid[i][j]=frame.mGrid[i][j];
@@ -210,7 +211,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     AssignFeaturesToGrid();
 }
 
-Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF, const IMU::Calib &ImuCalib, const cv::Mat &validMask)
+Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF, const IMU::Calib &ImuCalib, const cv::Mat &validMask, const cv::Mat &featureBoostMask, int featureBoostCount)
     :mpcpi(NULL),mpORBvocabulary(voc),mpORBextractorLeft(extractor),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
      mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)),mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
      mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false),
@@ -234,6 +235,48 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 #endif
     vector<int> lapping={0,0};
     monoLeft=(*mpORBextractorLeft)(imGray,validMask,mvKeys,mDescriptors,lapping);
+    const size_t baseMaskCandidates=mpORBextractorLeft->maskCandidates;
+    const size_t baseMaskRejected=mpORBextractorLeft->maskRejected;
+    if(featureBoostCount<0 || (!featureBoostMask.empty() &&
+       (featureBoostMask.type()!=CV_8UC1 || featureBoostMask.size()!=imGray.size())))
+        throw std::runtime_error("Person feature boost mask/count is invalid");
+    if(featureBoostCount>0 && !featureBoostMask.empty() && cv::countNonZero(featureBoostMask)>0) {
+        std::vector<cv::KeyPoint> extraKeys;
+        cv::Mat extraDescriptors;
+        (*mpORBextractorLeft)(imGray,featureBoostMask,extraKeys,extraDescriptors,lapping,featureBoostCount);
+        std::vector<int> keep;
+        keep.reserve(extraKeys.size());
+        for(size_t i=0;i<extraKeys.size();++i) {
+            bool duplicate=false;
+            for(const auto& key:mvKeys) {
+                const cv::Point2f delta=key.pt-extraKeys[i].pt;
+                if(delta.dot(delta)<36.f) {duplicate=true;break;}
+            }
+            if(!duplicate) {
+                for(int index:keep) {
+                    const cv::Point2f delta=extraKeys[index].pt-extraKeys[i].pt;
+                    if(delta.dot(delta)<36.f) {duplicate=true;break;}
+                }
+            }
+            if(!duplicate) keep.push_back(static_cast<int>(i));
+        }
+        if(!keep.empty()) {
+            cv::Mat selected(static_cast<int>(keep.size()),32,CV_8UC1);
+            for(size_t i=0;i<keep.size();++i) {
+                mvKeys.push_back(extraKeys[keep[i]]);
+                extraDescriptors.row(keep[i]).copyTo(selected.row(static_cast<int>(i)));
+            }
+            if(mDescriptors.empty()) mDescriptors=selected;
+            else {
+                cv::Mat combined;
+                cv::vconcat(mDescriptors,selected,combined);
+                mDescriptors=combined;
+            }
+            mnFeatureBoostAdded=static_cast<int>(keep.size());
+        }
+        mpORBextractorLeft->maskCandidates=baseMaskCandidates;
+        mpORBextractorLeft->maskRejected=baseMaskRejected;
+    }
 #ifdef REGISTER_TIMES
     std::chrono::steady_clock::time_point time_EndExtORB = std::chrono::steady_clock::now();
 

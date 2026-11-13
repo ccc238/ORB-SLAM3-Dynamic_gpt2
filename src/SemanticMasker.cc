@@ -32,6 +32,8 @@ void ValidateConfig(const SemanticConfig& c) {
         Require(std::isfinite(c.confidence) && c.confidence>=0 && c.confidence<=1,"invalid confidence");
         Require(std::isfinite(c.iou) && c.iou>=0 && c.iou<=1,"invalid NMS IoU");
         Require(c.maxDetections>0 && c.maxDetections<=8400 && c.dilation>=0 && c.dilation<=640,"invalid max detections or dilation radius");
+        Require(c.personFeatureBoost>=0 && c.personFeatureBoost<=1000 && c.personFeatureErode>=0 && c.personFeatureErode<=20,
+                "invalid person feature boost count or erosion radius");
 }
 cv::Mat RGB(const cv::Mat& image, bool isRGB) {
     Require(!image.empty() && image.depth()==CV_8U, "expected nonempty uint8 image");
@@ -79,6 +81,8 @@ SemanticConfig SemanticConfig::Read(const std::string& settings) {
     ReadValue(fs,"SemanticMask.Classes",c.classes); ReadValue(fs,"SemanticMask.Confidence",c.confidence);
     ReadValue(fs,"SemanticMask.NmsIoU",c.iou); ReadValue(fs,"SemanticMask.MaxDetections",c.maxDetections);
     ReadValue(fs,"SemanticMask.DilationRadius",c.dilation); ReadValue(fs,"SemanticMask.OutputDirectory",c.output);
+    ReadValue(fs,"SemanticMask.PersonFeatureBoost",c.personFeatureBoost);
+    ReadValue(fs,"SemanticMask.PersonFeatureErode",c.personFeatureErode);
     if(c.enabled && c.mode=="selected" && fs["SemanticMask.Classes"].empty())
         std::cout << "SemanticMask: Classes not specified; using default [0:person]." << std::endl;
     c.epipolar=EpipolarConfig::Read(fs,c.enabled,c.associationEnabled,c.enabled && c.maskingEnabled);
@@ -96,6 +100,8 @@ SemanticConfig SemanticConfig::Read(const std::string& settings) {
     for(int id:c.classes) std::cout << id << ":" << SemanticMasker::ClassName(id) << " ";
     std::cout << "] confidence=" << c.confidence << " nms_iou=" << c.iou << " max=" << c.maxDetections
               << " dilation_radius=" << c.dilation << " (square kernel; current SLAM image pixels) debug=" << c.debug << " visualize=" << c.visualize << " (requires Run.Viewer) output=" << c.output << std::endl;
+    std::cout << "SemanticMask person_feature_boost=" << c.personFeatureBoost
+              << " person_feature_erode_px=" << c.personFeatureErode << std::endl;
     return c;
 }
 const char* SemanticMasker::ClassName(int id) {

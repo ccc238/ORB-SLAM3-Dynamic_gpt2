@@ -75,15 +75,13 @@ int Run(int argc, char **argv)
     // The System constructor validates types and dependencies before any frames run.
     const auto filterSwitch=runtimeSettings["Dynamic.UseDynamicFilter"];
     const bool filterEnabled=filterSwitch.isInt() && int(filterSwitch)==0;
-    std::string filterMode="simulate";
-    if(runtimeSettings["Dynamic.FilterMode"].isString()) filterMode=std::string(runtimeSettings["Dynamic.FilterMode"]);
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
     ORB_SLAM3::System SLAM(argv[1],argv[2],ORB_SLAM3::System::RGBD,useViewer!=0);
     float imageScale = SLAM.GetImageScale();
 
     std::ofstream frameLog(output+"/RunFrames.csv");
     if(!frameLog) throw std::runtime_error("Cannot open RunFrames.csv");
-    frameLog << "frame,timestamp,track_ms,keypoints,state,filter_enabled,filter_mode\n";
+    frameLog << "frame,timestamp,track_ms,keypoints,state,enabled\n";
     // Vector for tracking time statistics
     vector<float> vTimesTrack;
     vTimesTrack.resize(nImages);
@@ -143,7 +141,7 @@ int Run(int argc, char **argv)
 
         vTimesTrack[ni]=ttrack;
         frameLog << ni << ',' << std::setprecision(16) << tframe << ',' << ttrack*1000 << ','
-                 << SLAM.GetTrackedKeyPointsUn().size() << ',' << SLAM.GetTrackingState() << ',' << filterEnabled << ',' << filterMode << '\n';
+                 << SLAM.GetTrackedKeyPointsUn().size() << ',' << SLAM.GetTrackingState() << ',' << filterEnabled << '\n';
 
         // Wait to load the next frame
         double T=0;

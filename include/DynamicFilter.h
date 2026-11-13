@@ -7,7 +7,7 @@ class Frame;
 struct DynamicFilterConfig {
     bool enabled=false;
     int raw=1;
-    std::string mode="simulate",output="outputs/dynamic-filter";
+    std::string output="outputs/dynamic-filter";
     double maxRatio=.2;
     int minRemaining=50,minFinalInliers=30,minCells=6;
     static DynamicFilterConfig Read(cv::FileStorage&);
